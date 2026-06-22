@@ -1,0 +1,30 @@
+[
+  {
+    "company": "㈜포스코",
+    "title": "2026년 포스코 AI 전문인력 채용",
+    "deadline": "~2026.07.05(일)",
+    "detail_url": "https://www.jobkorea.co.kr/Recruit/GI_Read/49351471",
+    "deep_scraped": {
+      "employment_type": "인턴",
+      "jd_summary": "공고 상세 직무 내용을 참조하십시오.",
+      "welfare_tags": [
+        "주5일제",
+        "4대보험"
+      ]
+    },
+    "extracted_info": {
+      "job_category": "IT / 데이터 / AI",
+      "career_level": "신입·경력",
+      "education": "대졸↑",
+      "location": [
+        "서울"
+      ]
+    },
+    "company_insight": {
+      "company_size": "대기업",
+      "primary_industry": "철강 및 신소재 제조",
+      "mid_long_term_plan": "생산 공정 전반의 초자동화를 위한 인공지능(AI) 인프라 도입 및 디지털 트랜스포메이션 가속화",
+      "stability_score": "최상 (국민연금 가입자 최근 1년 4.2% 증가)"
+    }
+  }
+]

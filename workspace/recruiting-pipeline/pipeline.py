@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import requests
 import subprocess
 import sys
 import time
@@ -31,12 +32,29 @@ def run_script(script_name):
         print(f"Error running {script_name}")
         sys.exit(res.returncode)
 
+def dispatch_to_activepieces():
+    # 검증을 통과한 최종 데이터 로드
+    with open("./data/final_recruit_dashboard.json", "r", encoding="utf-8") as f:
+        dashboard_data = json.load(f)
+    
+    # Activepieces Webhook URL
+    activepieces_url = "https://cloud.activepieces.com/api/v1/webhooks/kYOBiWcUzz7gV1vzFob6l"
+    
+    # 데이터 전송
+    headers = {"Content-Type": "application/json"}
+    response = requests.post(activepieces_url, data=json.dumps(dashboard_data), headers=headers)
+    
+    if response.status_code == 200:
+        print("Successfully dispatched to Activepieces Loop.")
+    else:
+        print(f"Failed to dispatch: {response.status_code}")
+
 def main():
     state = load_state()
     start_phase = state.get("current_phase", "")
     print(f"Starting Recruiting Pipeline. Resuming from phase: {start_phase or 'START'}")
     
-    if not start_phase or start_phase == "START":
+    if not start_phase or start_phase in ["START", "IDLE"]:
         state["current_phase"] = "FETCH"
         save_state(state)
         run_script("workspace/recruiting-pipeline/crawler.py")
@@ -134,7 +152,10 @@ def main():
                 final_data = json.load(f)
             with open("data/final_recruit_dashboard.json", "w", encoding="utf-8") as f:
                 json.dump(final_data, f, ensure_ascii=False, indent=2)
-            print("Dashboard message posted via Slack Webhook successfully.")
+            try:
+                dispatch_to_activepieces()
+            except Exception as e:
+                print(f"Error dispatching to Activepieces: {e}", file=sys.stderr)
             
         state["current_phase"] = "IDLE"
         state["last_run_timestamp"] = time.strftime("%Y-%m-%d")
