@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 import json
-import os
 import sys
-import hashlib
 import urllib.parse
-from openai import OpenAI
+
+from common import (
+    ENRICH_OUTPUT_PATH,
+    SCORE_OUTPUT_PATH,
+    USER_PROFILE_PATH,
+    dedupe_preserve_order,
+    init_openai_client,
+    read_json,
+    write_json,
+)
 
 DEFAULT_USER_PROFILE = {
     "skills": ["AI", "ML", "Python", "Data Pipeline", "데이터"],
@@ -12,21 +19,12 @@ DEFAULT_USER_PROFILE = {
     "education": "대졸"
 }
 
-client = None
-if os.environ.get("OPENAI_API_KEY"):
-    try:
-        client = OpenAI()
-    except Exception as e:
-        print(f"OpenAI client init failed: {e}")
+client = init_openai_client("scorer")
 
 def load_user_profile():
-    profile_path = "data/user_profile.json"
-    if os.path.exists(profile_path):
-        with open(profile_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    os.makedirs("data", exist_ok=True)
-    with open(profile_path, "w", encoding="utf-8") as f:
-        json.dump(DEFAULT_USER_PROFILE, f, ensure_ascii=False, indent=2)
+    if USER_PROFILE_PATH.exists():
+        return read_json(USER_PROFILE_PATH, DEFAULT_USER_PROFILE)
+    write_json(USER_PROFILE_PATH, DEFAULT_USER_PROFILE)
     return DEFAULT_USER_PROFILE
 
 def calculate_fit_score(item, profile):
@@ -51,16 +49,61 @@ def calculate_fit_score(item, profile):
                 location_matched = True
                 score += 10
                 break
+        if location_matched:
+            break
                 
     return min(100, max(0, score)), location_matched
 
-def get_fallback_job_data(item, profile, fallback_jd_summary):
+def as_list(value, default=None):
+    if isinstance(value, list):
+        return value
+    if value:
+        return [value]
+    return default or []
+
+
+def format_welfare(deep_data):
+    welfare = deep_data.get("welfare_tags", [])
+    if isinstance(welfare, list):
+        return ", ".join(welfare) if welfare else "정보없음"
+    return str(welfare or "정보없음")
+
+
+def normalize_company_insight(item):
+    raw = item.get("company_insight", {}) if isinstance(item.get("company_insight", {}), dict) else {}
+    stability = raw.get("stability") or raw.get("stability_score") or "보통 (국민연금 가입자 최근 1년 유지)"
+    return {
+        "company_size": raw.get("company_size", "중소기업"),
+        "primary_industry": raw.get("primary_industry", "기타 서비스 및 IT"),
+        "mid_long_term_plan": raw.get("mid_long_term_plan", "안정적 비즈니스 성장 및 핵심 디지털 파트너십 확장"),
+        "stability": stability,
+        "stability_score": stability,
+    }
+
+
+def build_architecture_fields(item, payload, location_matched):
+    deep_data = item.get("deep_scraped", {}) if isinstance(item.get("deep_scraped", {}), dict) else {}
+    extracted = item.get("extracted_info", {}) if isinstance(item.get("extracted_info", {}), dict) else {}
+    return {
+        "analysis": {
+            "job_category": extracted.get("job_category", "IT / 데이터 / AI"),
+            "location_score": "95점 (선호 지역 일치)" if location_matched else "70점 (선호 지역 미확인)",
+            "jd_summary": payload.get("jd_summary", "공고 상세 직무 내용을 참조하십시오."),
+            "welfare": format_welfare(deep_data),
+        },
+        "company_insight": normalize_company_insight(item),
+    }
+
+
+def build_base_job_data(item, profile, fallback_jd_summary):
     company = item.get("company", "")
     title = item.get("title", "")
     detail_url = item.get("detail_url", "")
     image_url = item.get("image_url", "")
     deadline = item.get("deadline", "~2026.07.05(일)")
-    deep_data = item.get("deep_scraped", {})
+    deep_data = item.get("deep_scraped", {}) if isinstance(item.get("deep_scraped", {}), dict) else {}
+    extracted = item.get("extracted_info", {}) if isinstance(item.get("extracted_info", {}), dict) else {}
+    fallback_jd_summary = fallback_jd_summary or "공고 상세 직무 내용을 참조하십시오."
     
     job_keywords = []
     combined_text = (title + " " + fallback_jd_summary).lower()
@@ -70,7 +113,7 @@ def get_fallback_job_data(item, profile, fallback_jd_summary):
     
     if len(job_keywords) < 3:
         job_keywords.extend(["#직무역량", "#자소서작성", "#성장가능성"])
-    job_keywords = list(set(job_keywords))[:5]
+    job_keywords = dedupe_preserve_order(job_keywords)[:5]
     
     career_url = deep_data.get("official_detail_url")
     if not career_url:
@@ -80,13 +123,14 @@ def get_fallback_job_data(item, profile, fallback_jd_summary):
     requirements = "공고 자격요건 및 전공 요건 참조"
     preferences = "우대 스택 및 동종 업계 경력 우대"
     
-    fit_score, _ = calculate_fit_score(item, profile)
+    fit_score, location_matched = calculate_fit_score(item, profile)
+    locs = as_list(extracted.get("location"), ["서울"])
     
-    return {
+    payload = {
         "company": company,
         "title": title,
         "employment_type": deep_data.get("employment_type", "정규직"),
-        "location": ", ".join(item.get("extracted_info", {}).get("location", ["서울"])),
+        "location": ", ".join(str(loc) for loc in locs),
         "salary": "회사내규에 따름",
         "requirements": requirements,
         "preferences": preferences,
@@ -98,13 +142,60 @@ def get_fallback_job_data(item, profile, fallback_jd_summary):
         "image_url": image_url,
         "fit_score": fit_score
     }
+    payload.update(build_architecture_fields(item, payload, location_matched))
+    return payload
+
+
+def normalize_refined_data(item, profile, candidate, fallback_jd_summary):
+    payload = build_base_job_data(item, profile, fallback_jd_summary)
+    candidate = candidate if isinstance(candidate, dict) else {}
+    pass_through_keys = [
+        "company", "title", "employment_type", "location", "salary",
+        "requirements", "preferences", "jd_summary", "company_career_url"
+    ]
+
+    for key in pass_through_keys:
+        value = candidate.get(key)
+        if value:
+            payload[key] = value
+
+    kw = candidate.get("job_keywords", payload["job_keywords"])
+    if not isinstance(kw, list):
+        kw = payload["job_keywords"]
+    kw = [keyword if str(keyword).startswith("#") else f"#{keyword}" for keyword in kw]
+    if len(kw) < 3:
+        kw.extend(["#직무역량", "#성장지향", "#자소서팁"])
+    payload["job_keywords"] = dedupe_preserve_order(kw)[:5]
+
+    jd_val = str(payload.get("jd_summary", "")).strip()
+    image_url = item.get("image_url", "")
+    if (not jd_val or "참조" in jd_val or len(jd_val) < 20) and image_url:
+        payload["jd_summary"] = f"<{image_url}|🖼️ 채용 공고 원본 이미지 확인하기 (클릭 시 이동)>"
+    elif not jd_val:
+        payload["jd_summary"] = "공고 상세 직무 내용을 참조하십시오."
+
+    sal_val = str(payload.get("salary", "")).strip()
+    if not sal_val or any(token in sal_val for token in ["협의", "미정", "회사내규", "추후협의"]):
+        payload["salary"] = "회사내규에 따름"
+
+    deep_data = item.get("deep_scraped", {}) if isinstance(item.get("deep_scraped", {}), dict) else {}
+    official_url = deep_data.get("official_detail_url")
+    if official_url:
+        payload["company_career_url"] = official_url
+
+    payload["detail_url"] = item.get("detail_url", "")
+    payload["deadline"] = item.get("deadline", "~2026.07.05(일)")
+    payload["image_url"] = item.get("image_url", "") or candidate.get("image_url", "")
+
+    fit_score, location_matched = calculate_fit_score(item, profile)
+    payload["fit_score"] = fit_score
+    payload.update(build_architecture_fields(item, payload, location_matched))
+    return payload
 
 def analyze_job_with_llm(item, profile):
     company = item.get("company", "")
     title = item.get("title", "")
-    detail_url = item.get("detail_url", "")
     image_url = item.get("image_url", "")
-    deadline = item.get("deadline", "~2026.07.05(일)")
     
     deep_data = item.get("deep_scraped", {})
     jd_summary_raw = deep_data.get("jd_summary", "")
@@ -123,7 +214,7 @@ def analyze_job_with_llm(item, profile):
         fallback_jd_summary = f"<{image_url}|🖼️ 채용 공고 원본 이미지 확인하기>"
         
     if not client:
-        return get_fallback_job_data(item, profile, fallback_jd_summary)
+        return normalize_refined_data(item, profile, {}, fallback_jd_summary)
         
     prompt = f"""
 Analyze the following recruitment listing and the user's career profile to refine the job description and create writing suggestions for self-introduction letters.
@@ -191,49 +282,19 @@ JSON schema:
         
         res_data = json.loads(response.choices[0].message.content)
         
-        jd_val = res_data.get("jd_summary", "")
-        if not jd_val or "참조" in jd_val or len(jd_val) < 20:
-            if image_url:
-                res_data["jd_summary"] = f"<{image_url}|🖼️ 채용 공고 원본 이미지 확인하기 (클릭 시 이동)>"
-                
-        kw = res_data.get("job_keywords", [])
-        if not isinstance(kw, list) or len(kw) < 3:
-            res_data["job_keywords"] = ["#직무역량", "#성장지향", "#자소서팁"]
-        else:
-            res_data["job_keywords"] = [k if k.startswith("#") else f"#{k}" for k in kw[:5]]
-            
-        sal_val = res_data.get("salary", "").strip()
-        if not sal_val or "협의" in sal_val or "미정" in sal_val or "회사내규" in sal_val or sal_val == "추후협의":
-            res_data["salary"] = "회사내규에 따름"
-            
-        res_data["detail_url"] = detail_url
-        res_data["deadline"] = deadline
-        res_data["image_url"] = image_url if image_url else res_data.get("image_url", "")
-        
-        official_url = deep_data.get("official_detail_url")
-        if official_url:
-            res_data["company_career_url"] = official_url
-        elif not res_data.get("company_career_url"):
-            encoded_company = urllib.parse.quote(company)
-            res_data["company_career_url"] = f"https://www.google.com/search?q={encoded_company}+채용+페이지"
-        
-        fit_score, _ = calculate_fit_score(item, profile)
-        res_data["fit_score"] = fit_score
-        
-        return res_data
+        return normalize_refined_data(item, profile, res_data, fallback_jd_summary)
     except Exception as e:
         print(f"LLM extraction failed: {e}, using fallback", file=sys.stderr)
-        return get_fallback_job_data(item, profile, fallback_jd_summary)
+        return normalize_refined_data(item, profile, {}, fallback_jd_summary)
 
 def main():
     print("Starting LLM Matching and Scoring Phase...")
-    input_path = "_workspace/enrich_output.json"
-    if not os.path.exists(input_path):
+    input_path = ENRICH_OUTPUT_PATH
+    if not input_path.exists():
         print(f"Error: Input file {input_path} not found.", file=sys.stderr)
         sys.exit(1)
         
-    with open(input_path, "r", encoding="utf-8") as f:
-        listings = json.load(f)
+    listings = read_json(input_path, [])
         
     profile = load_user_profile()
     scored_results = []
@@ -246,9 +307,8 @@ def main():
         refined_data = analyze_job_with_llm(item, profile)
         scored_results.append(refined_data)
         
-    output_path = "_workspace/score_output.json"
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(scored_results, f, ensure_ascii=False, indent=2)
+    output_path = SCORE_OUTPUT_PATH
+    write_json(output_path, scored_results)
     print(f"Saved refined data to {output_path}")
 
 if __name__ == "__main__":

@@ -9,3 +9,8 @@ workspace/recruiting-pipeline/_workspace/
 # Scraping dumps
 *.html
 *.txt
+!requirements.txt
+
+# Python runtime cache
+__pycache__/
+*.py[cod]

@@ -1,59 +1,49 @@
 #!/usr/bin/env python3
-import json
-import os
-import re
-import requests
 import subprocess
 import sys
 import time
-import base64
 import sqlite3
-import hashlib
 
-STATE_FILE = "data/pipeline_state.json"
-
-def calculate_file_hash(filepath):
-    if not os.path.exists(filepath):
-        return ""
-    hasher = hashlib.md5()
-    try:
-        with open(filepath, "rb") as f:
-            buf = f.read()
-            hasher.update(buf)
-        return hasher.hexdigest()
-    except Exception:
-        return ""
+from common import (
+    BASE_DIR,
+    DB_PATH,
+    FETCH_OUTPUT_PATH,
+    FINAL_DASHBOARD_PATH,
+    STATE_FILE,
+    USER_PROFILE_PATH,
+    VERIFY_OUTPUT_PATH,
+    calculate_file_hash,
+    normalized_job_key,
+    post_json,
+    read_json,
+    write_json,
+)
 
 def load_state():
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {
+    return read_json(STATE_FILE, {
         "current_phase": "",
         "last_processed_id": "",
         "user_profile_hash": "default_hash",
         "last_run_timestamp": "",
         "sent_job_ids": []  # 중복 방지용 고유 식별자 배열 추가
-    }
+    })
 
 def save_state(state):
-    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+    write_json(STATE_FILE, state)
 
 def run_script(script_name):
     print(f"\n--- Running {script_name} ---")
-    res = subprocess.run([sys.executable, "-X", "utf8", script_name], capture_output=False)
+    script_path = BASE_DIR / script_name
+    res = subprocess.run([sys.executable, "-X", "utf8", str(script_path)], cwd=BASE_DIR, capture_output=False)
     if res.returncode != 0:
         print(f"Error running {script_name}")
         sys.exit(res.returncode)
 
 def update_sent_status_in_db(detail_url):
-    db_path = "data/recruitment.db"
-    if not os.path.exists(db_path):
+    if not DB_PATH.exists():
         return
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("UPDATE jobs SET sent_status = 1 WHERE detail_url = ?", (detail_url,))
         conn.commit()
@@ -92,54 +82,55 @@ def preprocess_multi_source_payload(payload):
 
 def dispatch_to_activepieces(state):
     # 1. 하네스가 생성한 최종 정형화 데이터 로드
-    with open("./data/final_recruit_dashboard.json", "r", encoding="utf-8") as f:
-        dashboard_data = json.load(f)
-    
-    if isinstance(dashboard_data, list):
-        if not dashboard_data:
-            print("⚠ 발송할 채용 데이터가 비어있습니다.")
-            return False
-        payload = dashboard_data[0]
-    else:
-        payload = dashboard_data
+    dashboard_data = read_json(FINAL_DASHBOARD_PATH, [])
+    payloads = dashboard_data if isinstance(dashboard_data, list) else [dashboard_data]
+    payloads = [payload for payload in payloads if isinstance(payload, dict)]
 
-    # 2. 잡코리아/사람인/인크루트 통합 전처리 로직 실행
-    payload = preprocess_multi_source_payload(payload)
-
-    # 3. Activepieces Webhook URL
-    activepieces_url = "https://cloud.activepieces.com/api/v1/webhooks/kYOBiWcUzz7gV1vzFob6l"
-    
-    # 4. 전송
-    response = requests.post(activepieces_url, json=payload)
-    
-    if response.status_code == 200:
-        print("🚀 [성공] 보정된 채용 데이터가 Activepieces로 전송되었습니다.")
-        
-        # 5. 발송 성공 시 영구 중복 방지 캐시 메모리에 적재 및 SQLite 상태 동기화
-        unique_key = f"{payload.get('company', '')}_{payload.get('title', '')}"
-        if "sent_job_ids" not in state:
-            state["sent_job_ids"] = []
-        if unique_key not in state["sent_job_ids"]:
-            state["sent_job_ids"].append(unique_key)
-            
-        state["last_processed_id"] = unique_key
-        
-        # DB 업데이트 호출
-        if payload.get("detail_url"):
-            update_sent_status_in_db(payload["detail_url"])
-            
-        return True
-    else:
-        print(f"❌ [실패] 상태 코드: {response.status_code}, 메시지: {response.text}")
+    if not payloads:
+        print("⚠ 발송할 채용 데이터가 비어있습니다.")
         return False
+
+    # 2. Activepieces Webhook URL
+    activepieces_url = "https://cloud.activepieces.com/api/v1/webhooks/kYOBiWcUzz7gV1vzFob6l"
+
+    all_success = True
+    sent_count = 0
+
+    for payload in payloads:
+        # 3. 잡코리아/사람인/인크루트 통합 전처리 로직 실행
+        prepared_payload = preprocess_multi_source_payload(payload.copy())
+
+        # 4. 전송
+        ok, status_code, message = post_json(activepieces_url, prepared_payload, timeout=20)
+
+        if ok:
+            print(f"🚀 [성공] Activepieces 전송 완료: {prepared_payload.get('company', '')} - {prepared_payload.get('title', '')}")
+
+            # 5. 발송 성공 시 영구 중복 방지 캐시 메모리에 적재 및 SQLite 상태 동기화
+            unique_key = normalized_job_key(prepared_payload.get("company", ""), prepared_payload.get("title", ""))
+            state.setdefault("sent_job_ids", [])
+            if unique_key not in state["sent_job_ids"]:
+                state["sent_job_ids"].append(unique_key)
+
+            state["last_processed_id"] = unique_key
+
+            if prepared_payload.get("detail_url"):
+                update_sent_status_in_db(prepared_payload["detail_url"])
+
+            sent_count += 1
+        else:
+            all_success = False
+            print(f"❌ [실패] 상태 코드: {status_code}, 메시지: {message}")
+
+    print(f"Activepieces dispatch summary: {sent_count}/{len(payloads)} sent.")
+    return all_success
 
 def main():
     state = load_state()
     start_phase = state.get("current_phase", "")
     
     # Check user profile change
-    profile_path = "data/user_profile.json"
-    current_hash = calculate_file_hash(profile_path)
+    current_hash = calculate_file_hash(USER_PROFILE_PATH)
     old_hash = state.get("user_profile_hash", "")
     
     if current_hash and current_hash != old_hash:
@@ -161,25 +152,22 @@ def main():
             run_script("crawler.py")
         
         print("\n--- [Deduplication Control] 수집 데이터 중복 필터링 작동 ---")
-        raw_path = "_workspace/fetch_output.json"
-        
-        if os.path.exists(raw_path):
-            with open(raw_path, "r", encoding="utf-8") as f:
-                fetched_jobs = json.load(f)
+        if FETCH_OUTPUT_PATH.exists():
+            fetched_jobs = read_json(FETCH_OUTPUT_PATH, [])
             
             sent_ids = state.get("sent_job_ids", [])
             filtered_jobs = []
             
             for job in fetched_jobs:
-                unique_key = f"{job.get('company', '')}_{job.get('title', '')}"
-                if unique_key in sent_ids:
+                unique_key = normalized_job_key(job.get("company", ""), job.get("title", ""))
+                legacy_key = f"{job.get('company', '')}_{job.get('title', '')}"
+                if unique_key in sent_ids or legacy_key in sent_ids:
                     print(f"⏩ 중복 송출 차단 (이미 발송된 공고): {unique_key}")
                 else:
                     filtered_jobs.append(job)
             
             # 중복이 제거된 신규 공고 데이터로 수집 파일 갱신
-            with open(raw_path, "w", encoding="utf-8") as f:
-                json.dump(filtered_jobs, f, ensure_ascii=False, indent=2)
+            write_json(FETCH_OUTPUT_PATH, filtered_jobs)
             
             if not filtered_jobs:
                 print("🛑 새롭게 처리할 신규 공고가 없습니다. 파이프라인을 조기 종료하고 대기 상태로 진입합니다.")
@@ -239,21 +227,16 @@ def main():
                     print(f"SLACK [#system-error]: {error_msg}", file=sys.stderr)
                     sys.exit(1)
                     
-        start_phase = "VERIFY"
+        start_phase = "DISPATCH"
         
-    if start_phase == "VERIFY" and state["current_phase"] != "ERROR":
+    if start_phase == "DISPATCH" and state["current_phase"] != "ERROR":
         state["current_phase"] = "DISPATCH"
         save_state(state)
         
         print("\n--- Dispatching to Slack Block Kit (Webhook Trigger) ---")
-        os.makedirs("data", exist_ok=True)
-        final_data = []
-        
-        if os.path.exists("_workspace/verify_output.json"):
-            with open("_workspace/verify_output.json", "r", encoding="utf-8") as f:
-                final_data = json.load(f)
-            with open("data/final_recruit_dashboard.json", "w", encoding="utf-8") as f:
-                json.dump(final_data, f, ensure_ascii=False, indent=2)
+        if VERIFY_OUTPUT_PATH.exists():
+            final_data = read_json(VERIFY_OUTPUT_PATH, [])
+            write_json(FINAL_DASHBOARD_PATH, final_data)
             try:
                 dispatch_to_activepieces(state)
             except Exception as e:

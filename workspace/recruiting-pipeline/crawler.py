@@ -3,16 +3,16 @@ import urllib.request
 import urllib.error
 import re
 import json
-import os
 import sys
 import sqlite3
 import datetime
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 
+from common import DB_PATH, FETCH_OUTPUT_PATH, normalized_job_key, write_json
+
 BASE_URL = "https://www.jobkorea.co.kr"
 STARTER_URL = "https://www.jobkorea.co.kr/starter/"
-DB_PATH = "data/recruitment.db"
 DEFAULT_IMAGE = "https://images.unsplash.com/photo-1586281380349-632531db7ed4?w=500"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -21,17 +21,7 @@ HEADERS = {
 }
 
 def get_normalized_key(company, title):
-    # 회사명 정규화: (주), ㈜, 주식회사, (유), (유한), (재), 공백 제거
-    norm_co = re.sub(r'[\s\(\)\[\]㈜재유한주식회사]', '', company)
-    
-    # 제목 정규화: 공백, 특수문자 제거, D-xx스크랩 제거
-    norm_title = re.sub(r'[\s\(\)\[\]\-\_\,\.\!\?\&\@\:\;\|\'\"]', '', title)
-    norm_title = re.sub(r'D-\d+스크랩', '', norm_title)
-    
-    # platform 접미사 제거
-    norm_title = re.sub(r'채용$', '', norm_title)
-    
-    return f"{norm_co.lower()}_{norm_title.lower()}"
+    return normalized_job_key(company, title)
 
 def parse_clean_deadline(deadline_str):
     if not deadline_str:
@@ -111,7 +101,7 @@ def parse_clean_deadline(deadline_str):
     return deadline_str
 
 def init_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
@@ -213,7 +203,7 @@ def parse_starter_page(html):
     
     items = soup.select('li.AgiCntnts')
     if not items:
-        items = soup.select('ul.lst starter-list li, div.lstStarter li, div.filterList li, tr.dvResumeTr')
+        items = soup.select('ul.lst.starter-list li, ul.starter-list li, div.lstStarter li, div.filterList li, tr.dvResumeTr')
     if not items:
         items = soup.select('div.listList div.list-default, tr.dvResumeTr, li.starter-item, li.list-item')
         
@@ -353,7 +343,7 @@ def deep_scrape_detail(url):
     for a_tag in soup.find_all('a', href=True):
         href = a_tag['href'].strip()
         href_lower = href.lower()
-        if any(x in href_lower for x in ['recruit', 'apply', 'career', 'h22a01-front', 'H22A1001']):
+        if any(x in href_lower for x in ['recruit', 'apply', 'career', 'h22a01-front', 'h22a1001']):
             if not any(p in href_lower for p in ['jobkorea', 'saramin', 'incruit', 'google', 'naver', 'daum', 'kakao', 'facebook', 'instagram', 'twitter', 'youtube', 'blog', 'tistory']):
                 if href.startswith('http'):
                     official_detail_url = href
@@ -524,10 +514,8 @@ def main():
     
     unsent_jobs = get_unsent_jobs()
             
-    os.makedirs("_workspace", exist_ok=True)
-    with open("_workspace/fetch_output.json", "w", encoding="utf-8") as f:
-        json.dump(unsent_jobs, f, ensure_ascii=False, indent=2)
-    print(f"Saved {len(unsent_jobs)} unsent listings to _workspace/fetch_output.json")
+    write_json(FETCH_OUTPUT_PATH, unsent_jobs)
+    print(f"Saved {len(unsent_jobs)} unsent listings to {FETCH_OUTPUT_PATH}")
 
 if __name__ == "__main__":
     main()

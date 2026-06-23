@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 import json
-import os
 import sys
-import re
-from openai import OpenAI  # OpenAI 최신 버전 라이브러리 사용 가정
 
-# OpenAI 클라이언트 초기화 (환경 변수에 OPENAI_API_KEY 필요)
-client = None
-if os.environ.get("OPENAI_API_KEY"):
-    try:
-        client = OpenAI()
-    except Exception as e:
-        print(f"OpenAI client init failed: {e}")
+from common import (
+    ENRICH_OUTPUT_PATH,
+    FETCH_OUTPUT_PATH,
+    init_openai_client,
+    normalize_company_name,
+    read_json,
+    write_json,
+)
+
+client = init_openai_client("enricher")
 
 LOCAL_DART_DB = {
     "포스코": {
@@ -47,7 +47,7 @@ def get_llm_company_info(company_name):
     if not client:
         return None
     
-    cleaned_name = re.sub(r'[\s\(\)\[\]㈜재유한주식회사]', '', company_name)
+    cleaned_name = normalize_company_name(company_name)
     prompt = f"""
 Provide professional, realistic corporate profile data for the company "{company_name}" (also known as "{cleaned_name}").
 Fill in DART and National Pension-style statistics based on public/general knowledge.
@@ -79,8 +79,10 @@ JSON schema:
 
 def enrich_company_info(company_name):
     matched_key = None
+    normalized_company = normalize_company_name(company_name)
     for key in LOCAL_DART_DB:
-        if key in company_name:
+        normalized_key = normalize_company_name(key)
+        if normalized_key and normalized_key in normalized_company:
             matched_key = key
             break
             
@@ -142,13 +144,12 @@ def extract_jd_from_image(image_url):
 
 def main():
     print("Starting Corporate Data Enrichment Phase...")
-    input_path = "_workspace/fetch_output.json"
-    if not os.path.exists(input_path):
+    input_path = FETCH_OUTPUT_PATH
+    if not input_path.exists():
         print(f"Error: Input file {input_path} not found.", file=sys.stderr)
         sys.exit(1)
         
-    with open(input_path, "r", encoding="utf-8") as f:
-        listings = json.load(f)
+    listings = read_json(input_path, [])
         
     enriched_results = []
     for item in listings:
@@ -179,9 +180,8 @@ def main():
         
         enriched_results.append(item)
         
-    output_path = "_workspace/enrich_output.json"
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(enriched_results, f, ensure_ascii=False, indent=2)
+    output_path = ENRICH_OUTPUT_PATH
+    write_json(output_path, enriched_results)
     print(f"Saved enriched data to {output_path}")
 
 if __name__ == "__main__":
