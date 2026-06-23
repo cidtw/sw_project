@@ -33,6 +33,25 @@
 
 ---
 
+## 🧩 2026-06-23 Codex 리팩토링 작업 기록
+
+Codex는 기존 Antigravity/Claude 에이전트들이 구성한 파이프라인 아키텍처를 유지하면서, 실행 안정성과 스키마 정합성을 중심으로 소스 코드를 리팩토링했습니다.
+
+- `workspace/recruiting-pipeline/common.py`를 추가하여 경로 상수, JSON 입출력, OpenAI Lazy Initialization, HTTP POST, 채용공고 중복키 정규화를 공통화했습니다.
+- `pipeline.py`의 체크포인트 흐름을 보강하여 `DISPATCH` 단계 재시작 시 전송 단계가 누락되지 않도록 수정했습니다.
+- Slack/Activepieces 전송 로직을 개선하여 최종 검증 결과가 배열일 때 첫 번째 공고만 보내지 않고 모든 신규 공고를 순회 전송하도록 변경했습니다.
+- `scorer.py`와 `verifier.py`의 스키마 계약을 맞춰, 기존 Slack용 flat payload와 에이전트 명세의 `analysis`, `company_insight`, `deadline`, `fit_score` 필드를 함께 보장하도록 정리했습니다.
+- `crawler.py`의 회사명/공고명 정규화 로직을 안전하게 교체하여 중복키 생성 시 한글 회사명이 과도하게 삭제되는 문제를 완화했습니다.
+- `remind_pipeline.py`의 webhook 호출에 timeout 및 실패 로그를 적용하여 외부 전송 실패가 루프 전체를 불필요하게 붙잡지 않도록 했습니다.
+- `requirements.txt`를 추가하고 Python 캐시 파일 ignore 규칙을 보강했습니다.
+
+검증 내역:
+- 전체 Python 소스에 대해 `py_compile` 문법 검사를 통과했습니다.
+- 샘플 데이터 기준 `fetch_output.json` ➔ `score_output.json` ➔ `verifier.py` 흐름이 강화된 verifier 규칙을 통과했습니다.
+- GitHub 원격 저장소 `main` 브랜치에 커밋 `0504daf`(`refactor: harden recruiting pipeline architecture`)로 반영했습니다.
+
+---
+
 ## ⏱️ 단계별 상세 워크플로우
 
 ### 1️⃣ 1단계: 수집 (FETCH)
