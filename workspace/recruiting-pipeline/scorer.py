@@ -72,8 +72,10 @@ def get_fallback_job_data(item, profile, fallback_jd_summary):
         job_keywords.extend(["#직무역량", "#자소서작성", "#성장가능성"])
     job_keywords = list(set(job_keywords))[:5]
     
-    encoded_company = urllib.parse.quote(company)
-    career_url = f"https://www.google.com/search?q={encoded_company}+채용+페이지"
+    career_url = deep_data.get("official_detail_url")
+    if not career_url:
+        encoded_company = urllib.parse.quote(company)
+        career_url = f"https://www.google.com/search?q={encoded_company}+채용+페이지"
     
     requirements = "공고 자격요건 및 전공 요건 참조"
     preferences = "우대 스택 및 동종 업계 경력 우대"
@@ -141,6 +143,7 @@ Welfare: {welfare_str}
 Company Insight: {company_insight}
 Original JD (Raw Text): {jd_summary_raw}
 Fallback Image URL: {image_url}
+Official Listing Details URL (Original Site): {deep_data.get("official_detail_url", "")}
 
 ### Instructions for fields:
 - employment_type: extract work type (e.g. 정규직/계약직/인턴)
@@ -155,7 +158,7 @@ Fallback Image URL: {image_url}
     - Compile 3 to 5 keywords helper for writing self-introduction.
     - Focus on company values, talent traits, key skills, and tips for personal essays.
     - MUST format each keyword as a string starting with "#" (e.g. "#인재상키워드", "#Python실무", "#자소서팁")
-- company_career_url: Provide the official corporate career site link or portal company info link. If not found, use google search query format: "https://www.google.com/search?q={{company_encoded_name}}+채용+페이지" (where {{company_encoded_name}} is the company name)
+- company_career_url: If Official Listing Details URL (Original Site) is provided, you MUST output it as company_career_url. Otherwise, provide the official corporate career site link. If not found, use google search query format: "https://www.google.com/search?q={{company_encoded_name}}+채용+페이지" (where {{company_encoded_name}} is the company name)
 - image_url: Provide the original listing image URL
 
 JSON schema:
@@ -207,7 +210,10 @@ JSON schema:
         res_data["deadline"] = deadline
         res_data["image_url"] = image_url if image_url else res_data.get("image_url", "")
         
-        if not res_data.get("company_career_url"):
+        official_url = deep_data.get("official_detail_url")
+        if official_url:
+            res_data["company_career_url"] = official_url
+        elif not res_data.get("company_career_url"):
             encoded_company = urllib.parse.quote(company)
             res_data["company_career_url"] = f"https://www.google.com/search?q={encoded_company}+채용+페이지"
         

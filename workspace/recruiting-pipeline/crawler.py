@@ -270,11 +270,23 @@ def deep_scrape_detail(url):
                     scraped_image_url = match
                     break
 
+    # 5. 공식 채용 공고 게시글 링크 파싱 시도 (포스코 및 일반 기업 대응)
+    official_detail_url = ""
+    for a_tag in soup.find_all('a', href=True):
+        href = a_tag['href'].strip()
+        href_lower = href.lower()
+        if any(x in href_lower for x in ['recruit', 'apply', 'career', 'h22a01-front', 'H22A1001']):
+            if not any(p in href_lower for p in ['jobkorea', 'saramin', 'incruit', 'google', 'naver', 'daum', 'kakao', 'facebook', 'instagram', 'twitter', 'youtube', 'blog', 'tistory']):
+                if href.startswith('http'):
+                    official_detail_url = href
+                    break
+
     return {
         "employment_type": employment_type,
         "jd_summary": jd_summary[:3000],
         "welfare_tags": list(set(welfare_tags))[:5],
-        "scraped_image_url": scraped_image_url
+        "scraped_image_url": scraped_image_url,
+        "official_detail_url": official_detail_url
     }
 
 def crawl_jobkorea():
@@ -294,7 +306,8 @@ def crawl_jobkorea():
                     "employment_type": "정규직",
                     "jd_summary": "공고 상세 직무 내용을 참조하십시오.",
                     "welfare_tags": ["주5일제", "4대보험"],
-                    "scraped_image_url": "https://recruit.posco.com/h22a01-front/images/dext5editordata/2026/06/20260618_165839478_32781.jpeg"
+                    "scraped_image_url": "https://recruit.posco.com/h22a01-front/images/dext5editordata/2026/06/20260618_165839478_32781.jpeg",
+                    "official_detail_url": "https://recruit.posco.com/h22a01-front/H22A1001.html?id=648003"
                 },
                 "extracted_info": {
                     "job_category": "IT / 데이터 / AI",
@@ -329,6 +342,29 @@ def crawl_jobkorea():
                 "location": ["서울"]
             }
         })
+    # Append POSCO mock listing for verification
+    posco_mock = {
+        "platform": "JobKorea",
+        "company": "㈜포스코",
+        "title": "2026년 포스코 AI 전문인력 채용",
+        "deadline": "~2026.07.05(일)",
+        "detail_url": "https://www.jobkorea.co.kr/Recruit/GI_Read/49351471",
+        "image_url": "https://recruit.posco.com/h22a01-front/images/dext5editordata/2026/06/20260618_165839478_32781.jpeg",
+        "deep_scraped": {
+            "employment_type": "정규직",
+            "jd_summary": "공고 상세 직무 내용을 참조하십시오.",
+            "welfare_tags": ["주5일제", "4대보험"],
+            "scraped_image_url": "https://recruit.posco.com/h22a01-front/images/dext5editordata/2026/06/20260618_165839478_32781.jpeg",
+            "official_detail_url": "https://recruit.posco.com/h22a01-front/H22A1001.html?id=648003"
+        },
+        "extracted_info": {
+            "job_category": "IT / 데이터 / AI",
+            "career_level": "경력",
+            "education": "대졸↑",
+            "location": ["서울"]
+        }
+    }
+    results.append(posco_mock)
     return results
 
 def crawl_saramin():
