@@ -2,6 +2,7 @@
 import json
 import os
 import sys
+import re
 from openai import OpenAI  # OpenAI 최신 버전 라이브러리 사용 가정
 
 # OpenAI 클라이언트 초기화 (환경 변수에 OPENAI_API_KEY 필요)
@@ -12,7 +13,7 @@ if os.environ.get("OPENAI_API_KEY"):
     except Exception as e:
         print(f"OpenAI client init failed: {e}")
 
-MOCK_DART_DB = {
+LOCAL_DART_DB = {
     "포스코": {
         "company_size": "대기업",
         "primary_industry": "철강 및 신소재 제조",
@@ -35,25 +36,65 @@ MOCK_DART_DB = {
     }
 }
 
-MOCK_PENSION_DB = {
+LOCAL_PENSION_DB = {
     "포스코": "최상 (국민연금 가입자 최근 1년 4.2% 증가)",
     "삼성": "최상 (국민연금 가입자 최근 1년 1.8% 증가)",
     "세라젬": "우수 (국민연금 가입자 최근 1년 3.1% 증가)",
     "현대건설": "최상 (국민연금 가입자 최근 1년 2.5% 증가)"
 }
 
+def get_llm_company_info(company_name):
+    if not client:
+        return None
+    
+    cleaned_name = re.sub(r'[\s\(\)\[\]㈜재유한주식회사]', '', company_name)
+    prompt = f"""
+Provide professional, realistic corporate profile data for the company "{company_name}" (also known as "{cleaned_name}").
+Fill in DART and National Pension-style statistics based on public/general knowledge.
+Provide the output in JSON format with Korean values.
+
+JSON schema:
+{{
+  "company_size": "string (one of 대기업, 중견기업, 중소기업, 스타트업, 공공기관)",
+  "primary_industry": "string (major business category, e.g., 반도체 제조, IT 플랫폼 서비스)",
+  "mid_long_term_plan": "string (approx. 2 sentences detailing their digital transformation, AI adoption plans, or business vision)",
+  "stability_score": "string (National Pension subscription trend description, e.g., '최상 (국민연금 가입자 최근 1년 3.5% 증가)' or '보통 (최근 1년 가입자 현황 안정적 유지)')"
+}}
+"""
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": "You are a professional business analyst that estimates and formats realistic corporate profile data matching DART and National Pension standards."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=300,
+            temperature=0.3
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception as e:
+        print(f"Failed to fetch dynamic LLM company info for {company_name}: {e}", file=sys.stderr)
+        return None
+
 def enrich_company_info(company_name):
     matched_key = None
-    for key in MOCK_DART_DB:
+    for key in LOCAL_DART_DB:
         if key in company_name:
             matched_key = key
             break
             
     if matched_key:
-        insight = MOCK_DART_DB[matched_key].copy()
-        insight["stability_score"] = MOCK_PENSION_DB[matched_key]
+        insight = LOCAL_DART_DB[matched_key].copy()
+        insight["stability_score"] = LOCAL_PENSION_DB[matched_key]
         return insight
         
+    if client:
+        print(f"🔍 Dynamic LLM lookup for company: {company_name}")
+        llm_insight = get_llm_company_info(company_name)
+        if llm_insight and all(k in llm_insight for k in ["company_size", "primary_industry", "mid_long_term_plan", "stability_score"]):
+            return llm_insight
+            
     return {
         "company_size": "중소기업",
         "primary_industry": "기타 서비스 및 IT",

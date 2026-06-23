@@ -293,30 +293,8 @@ def crawl_jobkorea():
     print("Crawling JobKorea...")
     html = fetch_html(STARTER_URL)
     if not html:
-        print("Using Mock Data due to connection failure/blocking.")
-        return [
-            {
-                "platform": "JobKorea",
-                "company": "㈜포스코",
-                "title": "2026년 포스코 AI 전문인력 채용",
-                "deadline": "~2026.07.05(일)",
-                "detail_url": "https://www.jobkorea.co.kr/Recruit/GI_Read/49351471",
-                "image_url": "https://recruit.posco.com/h22a01-front/images/dext5editordata/2026/06/20260618_165839478_32781.jpeg",
-                "deep_scraped": {
-                    "employment_type": "정규직",
-                    "jd_summary": "공고 상세 직무 내용을 참조하십시오.",
-                    "welfare_tags": ["주5일제", "4대보험"],
-                    "scraped_image_url": "https://recruit.posco.com/h22a01-front/images/dext5editordata/2026/06/20260618_165839478_32781.jpeg",
-                    "official_detail_url": "https://recruit.posco.com/h22a01-front/H22A1001.html?id=648003"
-                },
-                "extracted_info": {
-                    "job_category": "IT / 데이터 / AI",
-                    "career_level": "경력",
-                    "education": "대졸↑",
-                    "location": ["서울"]
-                }
-            }
-        ]
+        print("JobKorea connection failure or blocked. Returning empty list.")
+        return []
         
     listings = parse_starter_page(html)
     results = []
@@ -342,29 +320,6 @@ def crawl_jobkorea():
                 "location": ["서울"]
             }
         })
-    # Append POSCO mock listing for verification
-    posco_mock = {
-        "platform": "JobKorea",
-        "company": "㈜포스코",
-        "title": "2026년 포스코 AI 전문인력 채용",
-        "deadline": "~2026.07.05(일)",
-        "detail_url": "https://www.jobkorea.co.kr/Recruit/GI_Read/49351471",
-        "image_url": "https://recruit.posco.com/h22a01-front/images/dext5editordata/2026/06/20260618_165839478_32781.jpeg",
-        "deep_scraped": {
-            "employment_type": "정규직",
-            "jd_summary": "공고 상세 직무 내용을 참조하십시오.",
-            "welfare_tags": ["주5일제", "4대보험"],
-            "scraped_image_url": "https://recruit.posco.com/h22a01-front/images/dext5editordata/2026/06/20260618_165839478_32781.jpeg",
-            "official_detail_url": "https://recruit.posco.com/h22a01-front/H22A1001.html?id=648003"
-        },
-        "extracted_info": {
-            "job_category": "IT / 데이터 / AI",
-            "career_level": "경력",
-            "education": "대졸↑",
-            "location": ["서울"]
-        }
-    }
-    results.append(posco_mock)
     return results
 
 def crawl_saramin():
@@ -372,29 +327,8 @@ def crawl_saramin():
     url = "https://www.saramin.co.kr/zf_user/search/recruit?searchword=AI"
     html = fetch_html(url)
     if not html:
-        print("Saramin blocked/failed. Using mock data.")
-        return [
-            {
-                "platform": "Saramin",
-                "company": "세라젬",
-                "title": "헬스케어 디바이스 데이터 분석 연구원 채용",
-                "detail_url": "https://www.saramin.co.kr/zf_user/jobs/relay/view?rec_idx=49351481",
-                "deadline": "~2026.07.10(금)",
-                "image_url": "https://www.saramin.co.kr/zf_user/jobs/relay/view?rec_idx=49351481",
-                "deep_scraped": {
-                    "employment_type": "정규직",
-                    "jd_summary": "공고 상세 직무 내용을 참조하십시오.",
-                    "welfare_tags": ["4대보험", "주5일제"],
-                    "scraped_image_url": ""
-                },
-                "extracted_info": {
-                    "job_category": "IT / 데이터 / AI",
-                    "career_level": "경력",
-                    "education": "대졸↑",
-                    "location": ["서울"]
-                }
-            }
-        ]
+        print("Saramin connection failure or blocked. Returning empty list.")
+        return []
     
     soup = BeautifulSoup(html, 'html.parser')
     items = soup.select('.item_recruit')
@@ -441,29 +375,6 @@ def crawl_saramin():
         except Exception:
             continue
             
-    if not results:
-        return [
-            {
-                "platform": "Saramin",
-                "company": "세라젬",
-                "title": "헬스케어 디바이스 데이터 분석 연구원 채용",
-                "detail_url": "https://www.saramin.co.kr/zf_user/jobs/relay/view?rec_idx=49351481",
-                "deadline": "~2026.07.10(금)",
-                "image_url": DEFAULT_IMAGE,
-                "deep_scraped": {
-                    "employment_type": "정규직",
-                    "jd_summary": "공고 상세 직무 내용을 참조하십시오.",
-                    "welfare_tags": ["4대보험", "주5일제"],
-                    "scraped_image_url": ""
-                },
-                "extracted_info": {
-                    "job_category": "IT / 데이터 / AI",
-                    "career_level": "경력",
-                    "education": "대졸↑",
-                    "location": ["서울"]
-                }
-            }
-        ]
     return results
 
 def crawl_incruit():
@@ -471,29 +382,8 @@ def crawl_incruit():
     url = "https://search.incruit.com/list/search.asp?col=job&kw=AI"
     html = fetch_html(url)
     if not html:
-        print("Incruit blocked/failed. Using mock data.")
-        return [
-            {
-                "platform": "Incruit",
-                "company": "현대건설",
-                "title": "스마트건설 AI 알고리즘 개발자 경력 채용",
-                "detail_url": "https://job.incruit.com/jobdb_info/jobpost.asp?job=12345678",
-                "deadline": "~2026.06.30(화)",
-                "image_url": DEFAULT_IMAGE,
-                "deep_scraped": {
-                    "employment_type": "정규직",
-                    "jd_summary": "공고 상세 직무 내용을 참조하십시오.",
-                    "welfare_tags": ["4대보험", "주5일제"],
-                    "scraped_image_url": ""
-                },
-                "extracted_info": {
-                    "job_category": "IT / 데이터 / AI",
-                    "career_level": "경력",
-                    "education": "대졸↑",
-                    "location": ["서울"]
-                }
-            }
-        ]
+        print("Incruit connection failure or blocked. Returning empty list.")
+        return []
     
     soup = BeautifulSoup(html, 'html.parser')
     items = soup.select('div.n_job_list_default li, div.div_list_default tr, tr.dvResumeTr')
@@ -542,29 +432,6 @@ def crawl_incruit():
         except Exception:
             continue
             
-    if not results:
-        return [
-            {
-                "platform": "Incruit",
-                "company": "현대건설",
-                "title": "스마트건설 AI 알고리즘 개발자 경력 채용",
-                "detail_url": "https://job.incruit.com/jobdb_info/jobpost.asp?job=12345678",
-                "deadline": "~2026.06.30(화)",
-                "image_url": DEFAULT_IMAGE,
-                "deep_scraped": {
-                    "employment_type": "정규직",
-                    "jd_summary": "공고 상세 직무 내용을 참조하십시오.",
-                    "welfare_tags": ["4대보험", "주5일제"],
-                    "scraped_image_url": ""
-                },
-                "extracted_info": {
-                    "job_category": "IT / 데이터 / AI",
-                    "career_level": "경력",
-                    "education": "대졸↑",
-                    "location": ["서울"]
-                }
-            }
-        ]
     return results
 
 def main():
