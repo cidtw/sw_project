@@ -68,12 +68,28 @@ def main():
         
         location_score = "95점 (선호 지역 일치)" if loc_match else "60점 (선호 지역 불일치)"
         
+        # ────────── [수정 및 안전 보정 구간 시작] ──────────
+        deep_data = item.get("deep_scraped", {})
+        jd_summary = deep_data.get("jd_summary", "공고 참조")
+        
+        # 원본의 무의미한 문장이 그대로 있거나 비어있다면, 대안 분석 텍스트가 있는지 재검증
+        if not jd_summary or "참조하십시오" in jd_summary:
+            jd_summary = item.get("analysis", {}).get("jd_summary", jd_summary)
+
+        # 복리후생 리스트 문자열 깔끔하게 결합 변환 처리
+        welfare_raw = deep_data.get("welfare_tags", ["정보없음"])
+        if isinstance(welfare_raw, list):
+            welfare_str = ", ".join(welfare_raw)
+        else:
+            welfare_str = str(welfare_raw)
+        # ────────── [수정 및 안전 보정 구간 끝] ────────────
+        
         # Build analysis
         analysis = {
             "job_category": item.get("extracted_info", {}).get("job_category", "기타"),
             "location_score": location_score,
-            "jd_summary": item.get("deep_scraped", {}).get("jd_summary", "공고 참조"),
-            "welfare": ", ".join(item.get("deep_scraped", {}).get("welfare_tags", ["정보없음"]))
+            "jd_summary": jd_summary,  # ◀ 보정된 변수 맵핑
+            "welfare": welfare_str     # ◀ 보정된 변수 맵핑
         }
         
         # Build company insight
@@ -88,10 +104,12 @@ def main():
         refined_item = {
             "company": company,
             "title": title,
+            "detail_url": item.get("detail_url", ""), # ◀ 추가
             "deadline": item.get("deadline", "~2026.07.05(일)"),
             "fit_score": fit_score,
             "analysis": analysis,
-            "company_insight": company_insight
+            "company_insight": company_insight,
+            "image_url": item.get("image_url", "") # ◀ 이 값이 Activepieces로 넘어갑니다.
         }
         scored_results.append(refined_item)
         

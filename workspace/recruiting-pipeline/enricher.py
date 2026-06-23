@@ -2,6 +2,15 @@
 import json
 import os
 import sys
+from openai import OpenAI  # OpenAI 최신 버전 라이브러리 사용 가정
+
+# OpenAI 클라이언트 초기화 (환경 변수에 OPENAI_API_KEY 필요)
+client = None
+if os.environ.get("OPENAI_API_KEY"):
+    try:
+        client = OpenAI()
+    except Exception as e:
+        print(f"OpenAI client init failed: {e}")
 
 MOCK_DART_DB = {
     "포스코": {
@@ -34,7 +43,6 @@ MOCK_PENSION_DB = {
 }
 
 def enrich_company_info(company_name):
-    # Find matching keyword
     matched_key = None
     for key in MOCK_DART_DB:
         if key in company_name:
@@ -46,13 +54,50 @@ def enrich_company_info(company_name):
         insight["stability_score"] = MOCK_PENSION_DB[matched_key]
         return insight
         
-    # Default fallback values
     return {
         "company_size": "중소기업",
         "primary_industry": "기타 서비스 및 IT",
         "mid_long_term_plan": "안정적 비즈니스 성장 및 핵심 디지털 파트너십 확장",
         "stability_score": "보통 (국민연금 가입자 최근 1년 유지)"
     }
+
+def extract_jd_from_image(image_url):
+    """
+    통이미지 채용공고 URL을 받아 GPT-4o Vision으로 주요 업무 및 복리후생을 JSON으로 추출
+    """
+    print(f"📸 통이미지 공고 감지 -> Vision OCR 분석 시작 (URL: {image_url})")
+    if not client:
+        print("⚠️ OpenAI client not initialized (missing API key). Using fallback mock vision data.")
+        return {"jd_summary": "공고 상세 직무 내용을 참조하십시오. (Vision 분석 생략 - API 키 누락)", "welfare_tags": ["주5일제", "4대보험", "자녀학자금"]}
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            response_format={ "type": "json_object" },  # 완벽한 JSON 반환 보장
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text", 
+                            "text": "제공된 채용 공고 이미지 파일에서 주요 업무 요약(jd_summary)과 복리후생 항목(welfare_tags, 문자열 리스트 형식)을 추출해서 JSON으로 반환해줘. 구조 예시: {\"jd_summary\": \"...\", \"welfare_tags\": [\"...\", \"...\"]}"
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_url
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens=1000
+        )
+        
+        result = json.loads(response.choices[0].message.content)
+        return result
+    except Exception as e:
+        print(f"❌ Vision API 또는 파싱 실패: {e}", file=sys.stderr)
+        return {"jd_summary": "공고 상세 직무 내용을 참조하십시오. (Vision 분석 실패)", "welfare_tags": ["정보없음"]}
 
 def main():
     print("Starting Corporate Data Enrichment Phase...")
@@ -68,8 +113,29 @@ def main():
     for item in listings:
         company = item.get("company", "")
         print(f"Enriching company context for: {company}")
+        
+        # 1. 기존 기업 정보 맵핑
         company_insight = enrich_company_info(company)
         item["company_insight"] = company_insight
+        
+        # 2. [핵심 추가 및 보정] 이미지 공고 예외 처리 및 Vision OCR 연동
+        if "deep_scraped" not in item or not isinstance(item["deep_scraped"], dict):
+            item["deep_scraped"] = {}
+            
+        jd_summary = item["deep_scraped"].get("jd_summary", "")
+        image_url = item.get("image_url", "")  # crawler가 채워준 이미지 원본 주소
+        
+        # [조건 최적화] 텍스트가 부실하거나 비어있거나 '참조' 문구가 포함된 경우 판별
+        is_text_poor = not jd_summary or "참조" in str(jd_summary) or len(str(jd_summary)) < 30
+        
+        if is_text_poor and image_url:
+            print(f"🚨 [조건 충족] 부실 텍스트 감지되어 GPT-4o Vision을 강제 호출합니다!")
+            vision_data = extract_jd_from_image(image_url)
+            item["deep_scraped"]["jd_summary"] = vision_data.get("jd_summary", "공고 참조")
+            item["deep_scraped"]["welfare_tags"] = vision_data.get("welfare_tags", ["정보없음"])
+        else:
+            print(f"⏩ Vision OCR 스킵 조건: PoorText={is_text_poor}, HasImage={bool(image_url)}")
+        
         enriched_results.append(item)
         
     output_path = "_workspace/enrich_output.json"

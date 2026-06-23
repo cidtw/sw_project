@@ -4,7 +4,7 @@
 ---
 
 ## ⏱️ 1. 루프 사이클 및 하네스 환경 (Loop & Environment)
-* **실행 주기 (Heartbeat):** 매일 오전 09:00 / 오후 06:00 (시스템 스케쥴러에 의한 트리거로 작동)
+* **실행 주기 (Heartbeat):** 30분 단위 (30분마다 자동 실행)
 * **작업 디렉토리 (Worktree):** 독립된 하네스 샌드박스 `./workspace/recruiting-pipeline` 내부에서 구동
 * **영구 상태 메모리 (Persistent State):** 디스크 내 `./data/pipeline_state.json` (휘발성 세션 컨텍스트에 의존하지 않고, 에이전트가 매 루프 시작 시 직접 읽고 갱신해야 하는 하드웨어 저장소)
 
