@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import sqlite3
+import datetime
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 
@@ -14,7 +15,7 @@ STARTER_URL = "https://www.jobkorea.co.kr/starter/"
 DB_PATH = "data/recruitment.db"
 DEFAULT_IMAGE = "https://images.unsplash.com/photo-1586281380349-632531db7ed4?w=500"
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8"
 }
@@ -31,6 +32,83 @@ def get_normalized_key(company, title):
     norm_title = re.sub(r'채용$', '', norm_title)
     
     return f"{norm_co.lower()}_{norm_title.lower()}"
+
+def parse_clean_deadline(deadline_str):
+    if not deadline_str:
+        return "~2026.07.05(일)"
+    
+    deadline_str = deadline_str.strip()
+    
+    # 1. Check for YYYY.MM.DD or YYYY-MM-DD pattern first
+    match_yyyy_mm_dd = re.search(r'(\d{4})[./-](\d{2})[./-](\d{2})(?:\(([^)]+)\))?', deadline_str)
+    if match_yyyy_mm_dd:
+        year = match_yyyy_mm_dd.group(1)
+        month = match_yyyy_mm_dd.group(2)
+        day = match_yyyy_mm_dd.group(3)
+        day_of_week = match_yyyy_mm_dd.group(4)
+        if day_of_week:
+            return f"~ {year}.{month}.{day}({day_of_week})"
+        else:
+            try:
+                dt = datetime.datetime(int(year), int(month), int(day))
+                weeks = ['월', '화', '수', '목', '금', '토', '일']
+                day_of_week = weeks[dt.weekday()]
+                return f"~ {year}.{month}.{day}({day_of_week})"
+            except Exception:
+                return f"~ {year}.{month}.{day}"
+
+    # 2. Check for MM/DD pattern (excluding YYYY prefix)
+    match_mm_dd = re.search(r'(?<!\d)(\d{2})[./-](\d{2})(?:\(([^)]+)\))?', deadline_str)
+    if match_mm_dd:
+        month = match_mm_dd.group(1)
+        day = match_mm_dd.group(2)
+        day_of_week = match_mm_dd.group(3)
+        
+        now = datetime.datetime.now()
+        year = now.year
+        if int(month) < now.month - 1:
+            year += 1
+            
+        if day_of_week:
+            return f"~ {year}.{month}.{day}({day_of_week})"
+        else:
+            try:
+                dt = datetime.datetime(year, int(month), int(day))
+                weeks = ['월', '화', '수', '목', '금', '토', '일']
+                day_of_week = weeks[dt.weekday()]
+                return f"~ {year}.{month}.{day}({day_of_week})"
+            except Exception:
+                return f"~ {year}.{month}.{day}"
+                
+    # 3. Check for D-day or D-N patterns, e.g. "D-5" or "D-10" or "D-day"
+    match_dday = re.search(r'd[-_]?(day|\d+)', deadline_str, re.IGNORECASE)
+    if match_dday:
+        d_val = match_dday.group(1).lower()
+        now = datetime.datetime.now()
+        if d_val == 'day':
+            days_to_add = 0
+        else:
+            days_to_add = int(d_val)
+        target_date = now + datetime.timedelta(days=days_to_add)
+        weeks = ['월', '화', '수', '목', '금', '토', '일']
+        dow = weeks[target_date.weekday()]
+        return f"~ {target_date.year}.{target_date.strftime('%m')}.{target_date.strftime('%d')}({dow})"
+
+    # 4. Check for "오늘" (today)
+    if "오늘" in deadline_str:
+        now = datetime.datetime.now()
+        weeks = ['월', '화', '수', '목', '금', '토', '일']
+        dow = weeks[now.weekday()]
+        return f"~ {now.year}.{now.strftime('%m')}.{now.strftime('%d')}({dow})"
+        
+    # 5. Check for "내일" (tomorrow)
+    if "내일" in deadline_str:
+        tomorrow = datetime.datetime.now() + datetime.timedelta(days=1)
+        weeks = ['월', '화', '수', '목', '금', '토', '일']
+        dow = weeks[tomorrow.weekday()]
+        return f"~ {tomorrow.year}.{tomorrow.strftime('%m')}.{tomorrow.strftime('%d')}({dow})"
+        
+    return deadline_str
 
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -310,7 +388,7 @@ def crawl_jobkorea():
             "company": item.get("company", "알수없음"),
             "title": item.get("title", ""),
             "detail_url": item.get("detail_url", ""),
-            "deadline": item.get("deadline", "~2026.07.05(일)"),
+            "deadline": parse_clean_deadline(item.get("deadline", "~2026.07.05(일)")),
             "image_url": image_url,
             "deep_scraped": detail_info,
             "extracted_info": {
@@ -349,7 +427,7 @@ def crawl_saramin():
                 href = "https://www.saramin.co.kr" + href
                 
             deadline_el = item.select_one('.date')
-            deadline = deadline_el.get_text(strip=True) if deadline_el else "~2026.07.05(일)"
+            deadline = parse_clean_deadline(deadline_el.get_text(strip=True) if deadline_el else "~2026.07.05(일)")
             
             print(f"Deep scraping Saramin detail: {href}")
             detail_info = deep_scrape_detail(href)
@@ -406,7 +484,7 @@ def crawl_incruit():
                 href = "https://job.incruit.com" + href
                 
             deadline_el = item.select_one('span.date, span.dday')
-            deadline = deadline_el.get_text(strip=True) if deadline_el else "~2026.07.05(일)"
+            deadline = parse_clean_deadline(deadline_el.get_text(strip=True) if deadline_el else "~2026.07.05(일)")
             
             print(f"Deep scraping Incruit detail: {href}")
             detail_info = deep_scrape_detail(href)
