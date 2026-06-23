@@ -7,15 +7,30 @@ import os
 import sys
 import sqlite3
 from bs4 import BeautifulSoup
+from urllib.parse import urlparse
 
 BASE_URL = "https://www.jobkorea.co.kr"
 STARTER_URL = "https://www.jobkorea.co.kr/starter/"
 DB_PATH = "data/recruitment.db"
+DEFAULT_IMAGE = "https://images.unsplash.com/photo-1586281380349-632531db7ed4?w=500"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8"
 }
+
+def get_normalized_key(company, title):
+    # 회사명 정규화: (주), ㈜, 주식회사, (유), (유한), (재), 공백 제거
+    norm_co = re.sub(r'[\s\(\)\[\]㈜재유한주식회사]', '', company)
+    
+    # 제목 정규화: 공백, 특수문자 제거, D-xx스크랩 제거
+    norm_title = re.sub(r'[\s\(\)\[\]\-\_\,\.\!\?\&\@\:\;\|\'\"]', '', title)
+    norm_title = re.sub(r'D-\d+스크랩', '', norm_title)
+    
+    # platform 접미사 제거
+    norm_title = re.sub(r'채용$', '', norm_title)
+    
+    return f"{norm_co.lower()}_{norm_title.lower()}"
 
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -24,7 +39,10 @@ def init_db():
     
     cursor.execute("PRAGMA table_info(jobs)")
     columns = [c[1] for c in cursor.fetchall()]
-    if columns and "deep_scraped_json" not in columns:
+    if columns and "normalized_key" not in columns:
+        print("Old schema detected (missing normalized_key). Dropping table jobs.")
+        cursor.execute("DROP TABLE jobs")
+    elif columns and "deep_scraped_json" not in columns:
         print("Old schema detected in jobs table. Dropping it.")
         cursor.execute("DROP TABLE jobs")
     
@@ -41,6 +59,7 @@ def init_db():
             extracted_info_json TEXT,
             scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             sent_status INTEGER DEFAULT 0,
+            normalized_key TEXT UNIQUE,
             UNIQUE(company, title)
         )
     """)
@@ -52,22 +71,28 @@ def insert_jobs(jobs):
     cursor = conn.cursor()
     new_count = 0
     for job in jobs:
+        company = job.get("company", "")
+        title = job.get("title", "")
+        norm_key = get_normalized_key(company, title)
         try:
             cursor.execute("""
-                INSERT OR IGNORE INTO jobs (platform, company, title, detail_url, deadline, image_url, deep_scraped_json, extracted_info_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT OR IGNORE INTO jobs (platform, company, title, detail_url, deadline, image_url, deep_scraped_json, extracted_info_json, normalized_key)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 job.get("platform", "JobKorea"),
-                job.get("company", ""),
-                job.get("title", ""),
+                company,
+                title,
                 job.get("detail_url", ""),
                 job.get("deadline", ""),
                 job.get("image_url", ""),
                 json.dumps(job.get("deep_scraped", {}), ensure_ascii=False),
-                json.dumps(job.get("extracted_info", {}), ensure_ascii=False)
+                json.dumps(job.get("extracted_info", {}), ensure_ascii=False),
+                norm_key
             ))
             if cursor.rowcount > 0:
                 new_count += 1
+            else:
+                print(f"⏩ DB insert ignored (duplicate normalized_key): {norm_key}")
         except Exception as e:
             print(f"Error inserting job: {e}")
     conn.commit()
@@ -108,7 +133,9 @@ def parse_starter_page(html):
     soup = BeautifulSoup(html, 'html.parser')
     listings = []
     
-    items = soup.select('ul.lst starter-list li, div.lstStarter li, div.filterList li, tr.dvResumeTr')
+    items = soup.select('li.AgiCntnts')
+    if not items:
+        items = soup.select('ul.lst starter-list li, div.lstStarter li, div.filterList li, tr.dvResumeTr')
     if not items:
         items = soup.select('div.listList div.list-default, tr.dvResumeTr, li.starter-item, li.list-item')
         
@@ -125,14 +152,21 @@ def parse_starter_page(html):
 
     for item in items:
         try:
-            co_el = item.select_one('a.coLink, .coName, .corpName, .company')
+            co_el = item.select_one('strong.co, a.coLink, .coName, .corpName, .company')
             company = co_el.get_text(strip=True) if co_el else "알수없음"
             
-            title_el = item.select_one('a.link, a.AgiLink, .titLink, .title a')
+            title_el = item.select_one('span.tx, a.link, a.AgiLink, .titLink, .title a')
             if not title_el:
                 continue
             title = title_el.get_text(strip=True)
-            href = title_el.get('href', '')
+            
+            link_el = item.select_one('a.AgiLink')
+            href = ""
+            if link_el:
+                href = link_el.get('linkurl', '')
+            if not href:
+                href = title_el.get('href', '')
+                
             if not href.startswith('http'):
                 href = BASE_URL + href
                 
@@ -151,7 +185,15 @@ def parse_starter_page(html):
     return listings
 
 def deep_scrape_detail(url):
-    html = fetch_html(url)
+    target_url = url
+    if "saramin.co.kr" in url:
+        match = re.search(r'rec_idx=(\d+)', url)
+        if match:
+            rec_idx = match.group(1)
+            target_url = f"https://www.saramin.co.kr/zf_user/jobs/relay/view-detail?rec_idx={rec_idx}"
+            print(f"Bypassing Saramin detail to AJAX: {target_url}")
+            
+    html = fetch_html(target_url)
     if not html:
         return {
             "employment_type": "정규직",
@@ -172,7 +214,7 @@ def deep_scrape_detail(url):
         
     # 2. Welfare Tags
     welfare_tags = []
-    for tag in soup.select('.welfare, .welfare-list, .welfare-tags span, .tag'):
+    for tag in soup.select('.welfare, .welfare-list, .welfare-tags span, .tag, div.jw_welfare_box span, div.welfare_info span'):
         welfare_tags.append(tag.get_text(strip=True))
     if not welfare_tags:
         keywords = ["주4.5일제", "자녀학자금", "주택자금대출", "유연근무", "도서구매비", "식대지원", "퇴직연금", "건강검진"]
@@ -184,7 +226,7 @@ def deep_scrape_detail(url):
         
     # 3. JD Summary
     jd_summary = ""
-    jd_container = soup.select_one('.tbList, .artReadJobSum, .job-summary, .work-details')
+    jd_container = soup.select_one('.tbList, .artReadJobSum, .job-summary, .work-details, div.jv_detail, div.recru-details, div.job_description, div.content')
     if jd_container:
         jd_summary = jd_container.get_text(" ", strip=True)
     else:
@@ -197,29 +239,40 @@ def deep_scrape_detail(url):
         
     # 4. 이미지 주소 스캔
     scraped_image_url = ""
-    img_tags = soup.select('.gib_picture img, .template_area img, div.gi_gi_c img, iframe')
+    img_tags = soup.select('.gib_picture img, .template_area img, div.gi_gi_c img, div.jv_detail img, div.recru-details img, iframe')
+    if not img_tags:
+        img_tags = soup.find_all('img')
+        
     for img in img_tags:
         src = img.get('src', '') or img.get('data-src', '')
-        if '.jpg' in src.lower() or '.jpeg' in src.lower() or '.png' in src.lower():
+        if not src:
+            continue
+        src_lower = src.lower()
+        if any(x in src_lower for x in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
+            # Filter logos, icons, buttons, menus, and common sharing default templates
+            if any(x in src_lower for x in ['logo', 'icon', 'button', 'menu', 'common', 'loading', 'share_default', 'banner']):
+                continue
             if src.startswith('//'):
                 scraped_image_url = "https:" + src
             elif src.startswith('/'):
-                scraped_image_url = BASE_URL + src
+                parsed_url = urlparse(target_url)
+                scraped_image_url = f"{parsed_url.scheme}://{parsed_url.netloc}" + src
             else:
                 scraped_image_url = src
             break
 
     if not scraped_image_url:
-        img_matches = re.findall(r'https?://[^\s"\'><]+?\.(?:jpg|jpeg|png)', html, re.IGNORECASE)
+        img_matches = re.findall(r'https?://[^\s"\'><]+?\.(?:jpg|jpeg|png|gif|webp)', html, re.IGNORECASE)
         if img_matches:
             for match in img_matches:
-                if "icon" not in match and "logo" not in match:
+                match_lower = match.lower()
+                if not any(x in match_lower for x in ['logo', 'icon', 'button', 'menu', 'common', 'loading', 'share_default', 'banner']):
                     scraped_image_url = match
                     break
 
     return {
         "employment_type": employment_type,
-        "jd_summary": jd_summary[:200],
+        "jd_summary": jd_summary[:3000],
         "welfare_tags": list(set(welfare_tags))[:5],
         "scraped_image_url": scraped_image_url
     }
@@ -259,7 +312,7 @@ def crawl_jobkorea():
         detail_info = deep_scrape_detail(item['detail_url'])
         image_url = detail_info.get("scraped_image_url")
         if not image_url:
-            image_url = item.get("detail_url", "")
+            image_url = DEFAULT_IMAGE
             
         results.append({
             "platform": "JobKorea",
@@ -328,7 +381,12 @@ def crawl_saramin():
             deadline_el = item.select_one('.date')
             deadline = deadline_el.get_text(strip=True) if deadline_el else "~2026.07.05(일)"
             
-            image_url = href
+            print(f"Deep scraping Saramin detail: {href}")
+            detail_info = deep_scrape_detail(href)
+            image_url = detail_info.get("scraped_image_url")
+            if not image_url:
+                image_url = DEFAULT_IMAGE
+                
             results.append({
                 "platform": "Saramin",
                 "company": company,
@@ -336,12 +394,7 @@ def crawl_saramin():
                 "detail_url": href,
                 "deadline": deadline,
                 "image_url": image_url,
-                "deep_scraped": {
-                    "employment_type": "정규직",
-                    "jd_summary": "공고 상세 직무 내용을 참조하십시오.",
-                    "welfare_tags": ["4대보험", "주5일제"],
-                    "scraped_image_url": ""
-                },
+                "deep_scraped": detail_info,
                 "extracted_info": {
                     "job_category": "IT / 데이터 / AI" if "AI" in title or "데이터" in title else "사무 / 기획",
                     "career_level": "경력" if "경력" in title else "신입·경력",
@@ -360,7 +413,7 @@ def crawl_saramin():
                 "title": "헬스케어 디바이스 데이터 분석 연구원 채용",
                 "detail_url": "https://www.saramin.co.kr/zf_user/jobs/relay/view?rec_idx=49351481",
                 "deadline": "~2026.07.10(금)",
-                "image_url": "https://www.saramin.co.kr/zf_user/jobs/relay/view?rec_idx=49351481",
+                "image_url": DEFAULT_IMAGE,
                 "deep_scraped": {
                     "employment_type": "정규직",
                     "jd_summary": "공고 상세 직무 내용을 참조하십시오.",
@@ -390,7 +443,7 @@ def crawl_incruit():
                 "title": "스마트건설 AI 알고리즘 개발자 경력 채용",
                 "detail_url": "https://job.incruit.com/jobdb_info/jobpost.asp?job=12345678",
                 "deadline": "~2026.06.30(화)",
-                "image_url": "https://job.incruit.com/jobdb_info/jobpost.asp?job=12345678",
+                "image_url": DEFAULT_IMAGE,
                 "deep_scraped": {
                     "employment_type": "정규직",
                     "jd_summary": "공고 상세 직무 내용을 참조하십시오.",
@@ -429,7 +482,12 @@ def crawl_incruit():
             deadline_el = item.select_one('span.date, span.dday')
             deadline = deadline_el.get_text(strip=True) if deadline_el else "~2026.07.05(일)"
             
-            image_url = href
+            print(f"Deep scraping Incruit detail: {href}")
+            detail_info = deep_scrape_detail(href)
+            image_url = detail_info.get("scraped_image_url")
+            if not image_url:
+                image_url = DEFAULT_IMAGE
+                
             results.append({
                 "platform": "Incruit",
                 "company": company,
@@ -437,12 +495,7 @@ def crawl_incruit():
                 "detail_url": href,
                 "deadline": deadline,
                 "image_url": image_url,
-                "deep_scraped": {
-                    "employment_type": "정규직",
-                    "jd_summary": "공고 상세 직무 내용을 참조하십시오.",
-                    "welfare_tags": ["4대보험", "주5일제"],
-                    "scraped_image_url": ""
-                },
+                "deep_scraped": detail_info,
                 "extracted_info": {
                     "job_category": "IT / 데이터 / AI" if "AI" in title or "데이터" in title else "사무 / 기획",
                     "career_level": "경력" if "경력" in title else "신입·경력",
@@ -461,7 +514,7 @@ def crawl_incruit():
                 "title": "스마트건설 AI 알고리즘 개발자 경력 채용",
                 "detail_url": "https://job.incruit.com/jobdb_info/jobpost.asp?job=12345678",
                 "deadline": "~2026.06.30(화)",
-                "image_url": "https://job.incruit.com/jobdb_info/jobpost.asp?job=12345678",
+                "image_url": DEFAULT_IMAGE,
                 "deep_scraped": {
                     "employment_type": "정규직",
                     "jd_summary": "공고 상세 직무 내용을 참조하십시오.",

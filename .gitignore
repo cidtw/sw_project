@@ -1,0 +1,11 @@
+# Redundant root folders
+data/
+_workspace/
+
+# Sandbox runtime data and databases
+workspace/recruiting-pipeline/data/
+workspace/recruiting-pipeline/_workspace/
+
+# Scraping dumps
+*.html
+*.txt
