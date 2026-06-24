@@ -14,3 +14,14 @@ workspace/recruiting-pipeline/_workspace/
 # Python runtime cache
 __pycache__/
 *.py[cod]
+
+# Local agent/editor runtime files
+.agents/
+.codex/
+CLAUDE.md
+.claude/agents/ai-tell-detector.md
+.claude/agents/content-fidelity-auditor.md
+.claude/agents/humanize-monolith.md
+.claude/agents/korean-style-rewriter.md
+.claude/agents/naturalness-reviewer.md
+.claude/skills/humanize-korean-orchestrator/

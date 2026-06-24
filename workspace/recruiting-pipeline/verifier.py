@@ -32,6 +32,7 @@ def main():
     for idx, item in enumerate(scored_data):
         # Rule 4-1: Format Verification
         required_keys = [
+            "dispatch_type", "slack_user_id",
             "company", "title", "employment_type", "location", "salary", 
             "requirements", "preferences", "jd_summary", "job_keywords", 
             "detail_url", "company_career_url", "deadline", "image_url",
@@ -42,10 +43,16 @@ def main():
             errors.append(f"Item {idx} missing keys: {missing_keys}")
             continue
 
+        if item.get("dispatch_type") not in {"PUSH", "SEARCH"}:
+            errors.append(f"Item {idx} invalid dispatch_type: {item.get('dispatch_type')}")
+
+        if item.get("dispatch_type") == "SEARCH" and not str(item.get("slack_user_id", "")).strip():
+            errors.append(f"Item {idx} SEARCH payload missing slack_user_id")
+
         if not isinstance(item.get("fit_score"), int) or not 0 <= item["fit_score"] <= 100:
             errors.append(f"Item {idx} invalid fit_score: {item.get('fit_score')}")
 
-        if not isinstance(item.get("job_keywords"), list) or len(item["job_keywords"]) < 3:
+        if not isinstance(item.get("job_keywords"), list) or not 3 <= len(item["job_keywords"]) <= 5:
             errors.append(f"Item {idx} invalid job_keywords: {item.get('job_keywords')}")
         elif set(item["job_keywords"]) == GENERIC_KEYWORDS or GENERIC_KEYWORDS.issubset(set(item["job_keywords"])):
             errors.append(f"Item {idx} uses generic job_keywords: {item.get('job_keywords')}")

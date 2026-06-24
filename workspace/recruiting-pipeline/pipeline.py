@@ -14,7 +14,6 @@ from common import (
     VERIFY_OUTPUT_PATH,
     calculate_file_hash,
     normalized_job_key,
-    post_json,
     read_json,
     write_json,
 )
@@ -52,79 +51,30 @@ def update_sent_status_in_db(detail_url):
     except Exception as e:
         print(f"Failed to update sent_status in DB: {e}", file=sys.stderr)
 
-def preprocess_multi_source_payload(payload):
-    """
-    잡코리아, 사람인, 인크루트 데이터를 슬랙 블록킷 규격으로 통합 전처리합니다.
-    Handlebars 문법 오류 방지 및 부실 텍스트 자동 폴백(Fallback)을 수행합니다.
-    """
-    # 1. Activepieces 자바스크립트 엔진 오류 방지를 위한 해시태그 배열 문자열 변환
-    if "job_keywords" in payload and isinstance(payload["job_keywords"], list):
-        payload["job_keywords_string"] = "   ".join(payload["job_keywords"])
-    else:
-        payload["job_keywords_string"] = "#채용공고분석 #기업비전 #직무적합성"
-
-    # 2. 직무기술서 부실 상태 방어. 텍스트가 없을 때에만 이미지 링크로 대체한다.
-    jd_text = payload.get("jd_summary", "").strip()
-    img_url = payload.get("image_url", "").strip()
-    if "images.unsplash.com/photo-1586281380349-632531db7ed4" in jd_text:
-        jd_text = ""
-        payload["jd_summary"] = ""
-    if "images.unsplash.com/photo-1586281380349-632531db7ed4" in img_url:
-        img_url = ""
-        payload["image_url"] = ""
-    
-    if not jd_text or "참조" in jd_text or len(jd_text) < 12:
-        if img_url:
-            payload["jd_summary"] = f"<{img_url}|🖼️ 채용 공고 원본 이미지 확인하기 (클릭 시 이동)>"
-        else:
-            payload["jd_summary"] = "공고 상세 직무 내용 확인 필요"
-
-    return payload
-
-def dispatch_to_activepieces(state):
-    # 1. 하네스가 생성한 최종 정형화 데이터 로드
+def finalize_processed_jobs(state):
+    """검증된 공고를 처리 완료로 기록한다. Slack 송출은 FastAPI 앱이 직접 담당한다."""
     dashboard_data = read_json(FINAL_DASHBOARD_PATH, [])
     payloads = dashboard_data if isinstance(dashboard_data, list) else [dashboard_data]
     payloads = [payload for payload in payloads if isinstance(payload, dict)]
 
     if not payloads:
-        print("⚠ 발송할 채용 데이터가 비어있습니다.")
+        print("⚠ 처리 완료로 기록할 채용 데이터가 비어있습니다.")
         return False
 
-    # 2. Activepieces Webhook URL
-    activepieces_url = "https://cloud.activepieces.com/api/v1/webhooks/kYOBiWcUzz7gV1vzFob6l"
-
-    all_success = True
-    sent_count = 0
-
     for payload in payloads:
-        # 3. 잡코리아/사람인/인크루트 통합 전처리 로직 실행
-        prepared_payload = preprocess_multi_source_payload(payload.copy())
+        unique_key = normalized_job_key(payload.get("company", ""), payload.get("title", ""))
+        state.setdefault("sent_job_ids", [])
+        if unique_key not in state["sent_job_ids"]:
+            state["sent_job_ids"].append(unique_key)
 
-        # 4. 전송
-        ok, status_code, message = post_json(activepieces_url, prepared_payload, timeout=20)
+        state["last_processed_id"] = unique_key
 
-        if ok:
-            print(f"🚀 [성공] Activepieces 전송 완료: {prepared_payload.get('company', '')} - {prepared_payload.get('title', '')}")
+        if payload.get("detail_url"):
+            update_sent_status_in_db(payload["detail_url"])
 
-            # 5. 발송 성공 시 영구 중복 방지 캐시 메모리에 적재 및 SQLite 상태 동기화
-            unique_key = normalized_job_key(prepared_payload.get("company", ""), prepared_payload.get("title", ""))
-            state.setdefault("sent_job_ids", [])
-            if unique_key not in state["sent_job_ids"]:
-                state["sent_job_ids"].append(unique_key)
+    print(f"Processed job summary: {len(payloads)} item(s) finalized for Slack direct serving.")
+    return True
 
-            state["last_processed_id"] = unique_key
-
-            if prepared_payload.get("detail_url"):
-                update_sent_status_in_db(prepared_payload["detail_url"])
-
-            sent_count += 1
-        else:
-            all_success = False
-            print(f"❌ [실패] 상태 코드: {status_code}, 메시지: {message}")
-
-    print(f"Activepieces dispatch summary: {sent_count}/{len(payloads)} sent.")
-    return all_success
 
 def main():
     state = load_state()
@@ -234,21 +184,14 @@ def main():
         state["current_phase"] = "DISPATCH"
         save_state(state)
         
-        print("\n--- Dispatching to Slack Block Kit (Webhook Trigger) ---")
+        print("\n--- Finalizing Slack Direct Serving Data ---")
         if VERIFY_OUTPUT_PATH.exists():
             final_data = read_json(VERIFY_OUTPUT_PATH, [])
             write_json(FINAL_DASHBOARD_PATH, final_data)
             try:
-                dispatch_to_activepieces(state)
+                finalize_processed_jobs(state)
             except Exception as e:
-                print(f"Error dispatching to Activepieces: {e}", file=sys.stderr)
-                
-            # Run remind pipeline after successful dispatch
-            print("\n--- Running Remind Pipeline ---")
-            try:
-                run_script("remind_pipeline.py")
-            except Exception as e:
-                print(f"Error running remind_pipeline.py: {e}", file=sys.stderr)
+                print(f"Error finalizing processed jobs: {e}", file=sys.stderr)
             
         state["current_phase"] = "IDLE"
         state["last_run_timestamp"] = time.strftime("%Y-%m-%d")

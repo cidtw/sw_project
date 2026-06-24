@@ -1,0 +1,57 @@
+{
+  "blocks": [
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": ":rocket: *스마트 AI 맞춤형 채용 비서 서비스*\n\n👋 안녕하세요, *회원님*!\n잡코리아, 사람인, 인크루트의 실시간 채용 정보와 회원님의 프로필을 기반으로 최적의 커리어를 매칭해 드립니다. 원하시는 작업을 아래 버튼에서 선택해 주세요! 🎯"
+      }
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "actions",
+      "elements": [
+        {
+          "type": "button",
+          "style": "primary",
+          "text": {
+            "type": "plain_text",
+            "text": "📢 공고 실시간 업데이트",
+            "emoji": true
+          },
+          "action_id": "btn_live_update"
+        },
+        {
+          "type": "button",
+          "style": "primary",
+          "text": {
+            "type": "plain_text",
+            "text": "🔍 맞춤형 채용공고 찾기",
+            "emoji": true
+          },
+          "action_id": "btn_custom_search"
+        },
+        {
+          "type": "button",
+          "text": {
+            "type": "plain_text",
+            "text": "👤 개인정보 확인/수정",
+            "emoji": true
+          },
+          "action_id": "btn_user_profile"
+        },
+        {
+          "type": "button",
+          "text": {
+            "type": "plain_text",
+            "text": "⚙️ 환경설정",
+            "emoji": true
+          },
+          "action_id": "btn_search_preferences"
+        }
+      ]
+    }
+  ]
+}

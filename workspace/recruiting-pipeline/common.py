@@ -96,15 +96,3 @@ def dedupe_preserve_order(values):
         result.append(value)
     return result
 
-
-def post_json(url, payload, timeout=15):
-    try:
-        import requests
-    except ImportError as exc:
-        return False, 0, f"requests package unavailable: {exc}"
-
-    try:
-        response = requests.post(url, json=payload, timeout=timeout)
-        return 200 <= response.status_code < 300, response.status_code, response.text
-    except Exception as exc:
-        return False, 0, str(exc)

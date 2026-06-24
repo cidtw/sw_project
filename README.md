@@ -1,119 +1,187 @@
-# 🚀 AI 기반 초개인화 무인 채용 파이프라인 서비스
+# AI 맞춤형 채용 파이프라인
 
-본 서비스는 **JobKorea, Saramin, Incruit** 채용 플랫폼을 통합 수집하고, DART 및 국민연금 데이터를 연동한 뒤, 유저의 프로필과 채용 정보를 실시간 매칭하여 **Slack 맞춤형 알림 대시보드**로 송출하는 무인 채용 정보 서비스입니다.
+JobKorea, Saramin, Incruit 공고를 수집하고, 기업/공고 정보를 정형화한 뒤 Slack Block Kit 기반 챗봇으로 최신 공고와 개인 맞춤 추천을 제공하는 로컬 운영형 서비스입니다.
 
----
+## 현재 운영 방식
 
-## 📌 전체 시스템 아키텍처 및 흐름도
+이전 Activepieces Catch Webhook 연동 방식은 제거했습니다. 현재 서비스는 다음 구조로 동작합니다.
 
-![Recruiting Pipeline Flow](pipeline_flow.png)
+1. `pipeline.py`가 채용공고를 수집, 보강, 점수화, 검증합니다.
+2. 검증 결과는 `data/final_recruit_dashboard.json`과 SQLite DB에 저장됩니다.
+3. `slack_interactive_app.py` FastAPI 서버가 Slack Interactivity, Slash Command, Modal 요청을 직접 처리합니다.
+4. 로컬 FastAPI 서버는 ngrok public URL로 Slack에 연결합니다.
+5. Slack 메시지는 Activepieces 템플릿이 아니라 Slack Block Kit JSON을 직접 반환합니다.
 
----
+## 주요 기능
 
-## 🛠️ 핵심 기능 및 기술 구현 사항
+- 잡코리아, 사람인, 인크루트 통합 크롤링
+- 잡코리아 이미지형/JavaScript 청크형 공고 OCR/HTML 텍스트 추출
+- 자격요건, 우대요건, 직무기술서 핵심 요약
+- 기업 컨텍스트 및 직무 키워드 기반 공고 정형화
+- SQLite 기반 중복 저장 방지 및 처리 상태 관리
+- Slack Slash Command 호출
+- Slack Block Kit 버튼 기반 실시간 업데이트, 맞춤 추천, 개인정보 입력/수정, 환경설정
+- 사용자 프로필 기반 맞춤 추천 점수 계산
+- 경력 구분, 기술 스택, 프로젝트 요약, 어학 점수 기반 추천 보정
+- 특정 채용사이트, 고용형태, 경력유형, 마감임박 공고 필터링
 
-1. **다중 플랫폼 통합 수집 & 일원화 (Multi-Platform Consolidation)**
-   - **JobKorea, Saramin, Incruit** 3개 구인 플랫폼의 검색 데이터를 실시간 수집 및 통합합니다.
-   - 플랫폼별 파편화된 정보를 단일한 데이터 스키마로 표준화(일원화)하여 후속 파이프라인의 안전성을 보장합니다.
+## 실행 구조
 
-2. **SQLite 기반 누적 적재 및 중복 방지 (Deduplication & DB Accumulation)**
-   - `data/recruitment.db` 로컬 데이터베이스를 도입하여 수집된 정보를 누적 저장합니다.
-   - `UNIQUE(company, title)` 제약 조건을 적용하여 동일 기업의 동일한 채용 공고 수집을 원천 차단하고 `sent_status` 컬럼으로 전송 여부를 추적합니다.
-
-3. **안정적인 자율 에러 회복 (Error Resilience & Lazy Initialization)**
-   - `enricher.py` 내 OpenAI 클라이언트를 Lazy-Loading(지연 초기화)하여, `OPENAI_API_KEY` 환경 변수가 누락되거나 API 오류가 나더라도 오류를 무시하고 Mock 및 Vision fallback 데이터를 활용해 전체 루프가 중단 없이 끝까지 진행됩니다.
-
-4. **공고 원본 다이렉트 랜딩 (Direct Detail Landing)**
-   - `detail_url` 정보를 파이프라인 전 과정(FETCH ➔ DISPATCH)에 걸쳐 유지합니다.
-   - Slack의 채용 공고 상세 보기 버튼을 클릭했을 때 포털 메인이 아닌 **개별 상세 공고 포스팅 글**로 다이렉트 랜딩되도록 연결합니다.
-   - 이미지 크롤링 실패 또는 보안 사이트(Posco 등) 이미지 로딩 불량 시, Wikipedia 대신 해당 공고의 `detail_url`을 원본 이미지 대체 경로로 활용합니다.
-
-5. **Windows 환경 UTF-8 처리 보장**
-   - Windows 터미널의 기본 CP949 인코딩으로 인한 이모지 및 다국어 텍스트 출력 오류를 막기 위해, Python의 `-X utf8` 실행 플래그를 서브프로세스에 강제 매핑합니다.
-
----
-
-## 🧩 2026-06-23 Codex 리팩토링 작업 기록
-
-Codex는 기존 Antigravity/Claude 에이전트들이 구성한 파이프라인 아키텍처를 유지하면서, 실행 안정성과 스키마 정합성을 중심으로 소스 코드를 리팩토링했습니다.
-
-- `workspace/recruiting-pipeline/common.py`를 추가하여 경로 상수, JSON 입출력, OpenAI Lazy Initialization, HTTP POST, 채용공고 중복키 정규화를 공통화했습니다.
-- `pipeline.py`의 체크포인트 흐름을 보강하여 `DISPATCH` 단계 재시작 시 전송 단계가 누락되지 않도록 수정했습니다.
-- Slack/Activepieces 전송 로직을 개선하여 최종 검증 결과가 배열일 때 첫 번째 공고만 보내지 않고 모든 신규 공고를 순회 전송하도록 변경했습니다.
-- `scorer.py`와 `verifier.py`의 스키마 계약을 맞춰, 기존 Slack용 flat payload와 에이전트 명세의 `analysis`, `company_insight`, `deadline`, `fit_score` 필드를 함께 보장하도록 정리했습니다.
-- `crawler.py`의 회사명/공고명 정규화 로직을 안전하게 교체하여 중복키 생성 시 한글 회사명이 과도하게 삭제되는 문제를 완화했습니다.
-- `remind_pipeline.py`의 webhook 호출에 timeout 및 실패 로그를 적용하여 외부 전송 실패가 루프 전체를 불필요하게 붙잡지 않도록 했습니다.
-- `requirements.txt`를 추가하고 Python 캐시 파일 ignore 규칙을 보강했습니다.
-
-검증 내역:
-- 전체 Python 소스에 대해 `py_compile` 문법 검사를 통과했습니다.
-- 샘플 데이터 기준 `fetch_output.json` ➔ `score_output.json` ➔ `verifier.py` 흐름이 강화된 verifier 규칙을 통과했습니다.
-- GitHub 원격 저장소 `main` 브랜치에 커밋 `0504daf`(`refactor: harden recruiting pipeline architecture`)로 반영했습니다.
-
-### ⚠️ 설계(Architecture.md/Agents.md) 대비 실제 코드상 생략 및 변경된 사항
-
-실제 구현된 코드베이스 검토 결과, 초기 설계 및 에이전트 명세 대비 아래 기능들이 생략되거나 간소화되었습니다.
-
-1. **보안 이미지 우회 및 렌더링 (Imgur Image Bypass) 생략**
-   - `Architecture.md`에 기재된 Imgur CDN 우회 로직(`bypass_image_via_imgur`)은 실제 [pipeline.py](file:///c:/Users/MyDream/Desktop/git/project/workspace/recruiting-pipeline/pipeline.py) 리팩토링 과정에서 완전히 삭제되었습니다. 현재는 부실 텍스트 감지 시 Unsplash 기본 이미지(`DEFAULT_IMAGE`) 및 텍스트 Fallback만 적용됩니다.
-2. **Activepieces 연동 기업 정보 보강 생략 (LLM/로컬 캐시 대체)**
-   - `Agents.md` 상의 DART API/국민연금 데이터 Activepieces 위임 웹훅 방식 대신, [enricher.py](file:///c:/Users/MyDream/Desktop/git/project/workspace/recruiting-pipeline/enricher.py)에서 로컬 캐시 DB(`LOCAL_DART_DB`, `LOCAL_PENSION_DB`)를 조회하고 매칭이 안 되는 기업은 OpenAI API(`gpt-4o-mini`)를 통해 동적으로 보강하도록 대체 구현되었습니다.
-3. **Scrapy & Playwright-Stealth 수집 도구 생략 (urllib/BeautifulSoup 대체)**
-   - `Agents.md`에 언급된 Scrapy, Playwright-Stealth 및 원티드/리멤버 API 역추적 스크립트 대신, [crawler.py](file:///c:/Users/MyDream/Desktop/git/project/workspace/recruiting-pipeline/crawler.py)에서 표준 `urllib.request`와 `BeautifulSoup`을 사용하는 정적 스크래핑 방식으로 구현되어 있습니다.
-4. **코사인 유사도(Cosine Similarity) 단순 가산점 매칭 대체**
-   - 설계상의 Cosine Similarity 기반 매칭 점수 연산 대신, [scorer.py](file:///c:/Users/MyDream/Desktop/git/project/workspace/recruiting-pipeline/scorer.py) 내 `calculate_fit_score` 함수는 기술 키워드 일치(+8점) 및 선호 지역 일치(+10점)를 계산하는 휴리스틱 단순 가산점 방식으로 구현되어 있습니다.
-
----
-
-## ⏱️ 단계별 상세 워크플로우
-
-### 1️⃣ 1단계: 수집 (FETCH)
-- 30분 주기로 스케줄러가 작동하여 JobKorea, Saramin, Incruit를 크롤링합니다.
-- 수집된 신규 채용 정보는 SQLite DB(`data/recruitment.db`)에 `sent_status = 0`으로 삽입됩니다.
-- 미전송 신규 항목들을 `_workspace/fetch_output.json`으로 출력합니다.
-
-### 2️⃣ 2단계: 기업 확장 (ENRICH)
-- 기업명을 Key로 금융감독원 DART API 및 국민연금 데이터를 결합하여 기업 규모, 성장 추이, 경영계획 정보를 덧붙입니다.
-
-### 3️⃣ 3단계: 매칭 연산 (SCORE)
-- `data/user_profile.json` 내 유저의 개인 커리어, 선호 스택, 선호 지역 및 학력을 변수로 삼아 **코사인 유사도(Cosine Similarity)**를 연산하고 적합도 점수(0~100)를 산출합니다.
-
-### 4️⃣ 4단계: 검증 (VERIFY)
-- 독립적인 Verifier 프로세스를 통해 데이터의 정형성 및 누락 필드, 데이터 모순(연도 불일치 등)을 최종 셀프 체크합니다.
-
-### 5️⃣ 5단계: 슬랙 전송 (DISPATCH)
-- Activepieces Webhook을 호출하여 여러 신규 공고를 Slack Block Kit으로 각각 순회 전송하고, 최종 성공한 공고는 SQLite DB 내 `sent_status = 1`로 마킹하여 중복 전송을 완벽히 방지합니다.
-
----
-
-## 📋 적합도(Fit-Score) 산정 기준 (Criteria)
-
-1. **기본 점수**: **50점**으로 시작합니다.
-2. **기술 스택 매칭**: `user_profile.json` 내 `skills` 배열(예: AI, ML, Python, Data Pipeline)의 키워드가 공고 제목 및 요약에 존재할 때마다 **개당 +8점**을 가산합니다.
-3. **선호 지역 매칭**: 공고 위치 정보와 유저의 선호 지역이 일치할 시 **+10점**을 가산하고 `"선호 지역 일치"` 라벨을 슬랙에 반환합니다.
-4. **정규화**: 산출된 점수는 `0 ~ 100점` 범위 내로 최종 제한 및 환산됩니다.
-
----
-
-## 💾 최종 서빙 데이터 스키마 명세
-```json
-{
-  "company": "㈜포스코",
-  "title": "2026년 포스코 AI 전문인력 채용",
-  "detail_url": "https://www.jobkorea.co.kr/Recruit/GI_Read/49351471",
-  "deadline": "~2026.07.05(일)",
-  "fit_score": 68,
-  "analysis": {
-    "job_category": "IT / 데이터 / AI",
-    "location_score": "95점 (선호 지역 일치)",
-    "jd_summary": "공고 상세 직무 내용을 참조하십시오.",
-    "welfare": "주5일제, 4대보험"
-  },
-  "company_insight": {
-    "company_size": "대기업",
-    "mid_long_term_plan": "생산 공정 전반의 초자동화를 위한 인공지능(AI) 인프라 도입 및 디지털 트랜스포메이션 가속화",
-    "stability": "최상 (국민연금 가입자 최근 1년 4.2% 증가)"
-  },
-  "image_url": "https://recruit.posco.com/h22a01-front/images/dext5editordata/2026/06/20260618_165839478_32781.jpeg"
-}
+```text
+workspace/recruiting-pipeline/
+├── common.py
+├── crawler.py
+├── enricher.py
+├── scorer.py
+├── verifier.py
+├── pipeline.py
+├── chatbot_search.py
+├── slack_interactive_app.py
+├── slack-launcher-blocks.json
+├── slack-search-preferences-modal.json
+├── data/                 # git ignore
+└── _workspace/           # git ignore
 ```
+
+## Slack 설정
+
+### Interactivity Request URL
+
+Slack App의 `Interactivity & Shortcuts`에서 아래 URL을 지정합니다.
+
+```text
+https://<ngrok-domain>/slack/interactive
+```
+
+### Slash Command
+
+Slack App의 `Slash Commands`에서 아래 명령어를 등록합니다.
+
+```text
+/recruit
+```
+
+Request URL:
+
+```text
+https://<ngrok-domain>/slack/command
+```
+
+Usage Hint:
+
+```text
+업데이트 | 검색 | 프로필 | 설정
+```
+
+사용 예:
+
+```text
+/recruit
+/recruit 업데이트
+/recruit 검색
+/recruit 프로필
+/recruit 설정
+```
+
+### 필요한 Slack Bot Token 권한
+
+- `chat:write`
+- `commands`
+- `users:read`가 필요한 경우 사용자 표시명 확장에 사용
+
+모달을 열기 위해 Slack App의 Interactivity 설정은 반드시 켜져 있어야 합니다.
+
+## 로컬 실행
+
+```powershell
+cd C:\Users\MyDream\Desktop\git\project\workspace\recruiting-pipeline
+$env:SLACK_BOT_TOKEN="xoxb-..."
+python -X utf8 slack_interactive_app.py
+```
+
+ngrok:
+
+```powershell
+ngrok http 8000 --domain=<ngrok-domain>
+```
+
+파이프라인 단독 실행:
+
+```powershell
+cd C:\Users\MyDream\Desktop\git\project\workspace\recruiting-pipeline
+python -X utf8 pipeline.py
+```
+
+## Slack 버튼 기능
+
+- `공고 실시간 업데이트`: `pipeline.py`를 백그라운드 실행하고 최신순 채용 중 공고 10개를 카드 목록으로 표시합니다.
+- `맞춤형 채용공고 찾기`: 저장된 개인정보와 환경설정을 기준으로 추천 공고 1건을 표시합니다.
+- `다른 추천 채용`: 다음 추천 공고로 카드를 교체합니다.
+- `개인정보 확인/수정`: Slack Modal로 사용자 프로필을 저장합니다.
+- `입력 정보 전체 삭제`: 저장된 개인정보를 삭제하고 삭제 완료 모달로 전환합니다.
+- `환경설정`: 제외 사이트, 제외 키워드, 고용형태, 마감임박 포함 여부, 경력 필터, 푸시 알림 여부를 저장합니다.
+
+## 사용자 프로필 필드
+
+- 연령 및 성별
+- 최종 학력 및 전공
+- 경력 구분 및 총 경력
+- 근무 희망 지역
+- 최소 희망 연봉
+- 보유 자격증
+- 핵심 보유 기술 스택
+- 주요 경력/인턴십/프로젝트 한 줄 요약
+- 어학 성적 및 보유 점수
+
+## 데이터 흐름
+
+```text
+crawler.py
+  -> data/recruitment.db
+  -> _workspace/fetch_output.json
+enricher.py
+  -> _workspace/enrich_output.json
+scorer.py
+  -> _workspace/score_output.json
+verifier.py
+  -> _workspace/verify_output.json
+pipeline.py
+  -> data/final_recruit_dashboard.json
+  -> pipeline_state.json / DB sent_status 업데이트
+slack_interactive_app.py
+  -> Slack Block Kit 직접 응답
+```
+
+## 삭제한 Activepieces 관련 파일
+
+운영 방식이 ngrok + Slack Block Kit 직접 연결로 바뀌면서 아래 파일을 제거했습니다.
+
+- `workspace/recruiting-pipeline/remind_pipeline.py`
+- `workspace/recruiting-pipeline/send-activepieces-test.ps1`
+- `workspace/recruiting-pipeline/activepieces-test-payload.json`
+
+함께 제거한 코드:
+
+- `pipeline.py`의 Activepieces webhook dispatch 함수
+- `pipeline.py`의 Activepieces payload 전처리 함수
+- `common.py`의 webhook 전송 helper `post_json`
+- 파이프라인 종료 시 `remind_pipeline.py` 실행 경로
+
+## 검증 명령
+
+```powershell
+cd C:\Users\MyDream\Desktop\git\project
+python -m py_compile `
+  workspace\recruiting-pipeline\common.py `
+  workspace\recruiting-pipeline\crawler.py `
+  workspace\recruiting-pipeline\enricher.py `
+  workspace\recruiting-pipeline\scorer.py `
+  workspace\recruiting-pipeline\pipeline.py `
+  workspace\recruiting-pipeline\verifier.py `
+  workspace\recruiting-pipeline\chatbot_search.py `
+  workspace\recruiting-pipeline\slack_interactive_app.py
+```
+
+## 운영 파일 기준
+
+현재 GitHub에 남길 운영 파일은 파이프라인 실행 파일, Slack FastAPI 앱, Block Kit JSON, 문서, requirements입니다. 로컬 DB, 중간 산출물, ngrok 프로세스 상태, Slack token, 테스트 payload는 커밋하지 않습니다.

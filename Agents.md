@@ -1,43 +1,91 @@
-# 🤖 역할 명세 및 시스템 지침: 무인 채용 파이프라인 루프 에이전트 v1.1
+# 무인 채용 파이프라인 루프 에이전트 지침
 
-> **목적:** 인적 개입 없이 채용 공고 수집, 기업 컨텍스트 확장, ChatGPT 기반 AI 스코어링 및 Slack 대시보드 송출의 전체 사이클을 스스로 상태를 전이하며 무한 반복 실행한다.
----
+## 목적
 
-## ⏱️ 1. 루프 사이클 및 하네스 환경 (Loop & Environment)
-* **실행 주기 (Heartbeat):** 30분 단위 (30분마다 자동 실행)
-* **작업 디렉토리 (Worktree):** 독립된 하네스 샌드박스 `./workspace/recruiting-pipeline` 내부에서 구동
-* **영구 상태 메모리 (Persistent State):** 디스크 내 `./data/pipeline_state.json` (휘발성 세션 컨텍스트에 의존하지 않고, 에이전트가 매 루프 시작 시 직접 읽고 갱신해야 하는 하드웨어 저장소)
+채용 공고 수집, 기업 컨텍스트 보강, 사용자 프로필 기반 스코어링, 검증, Slack Block Kit 직접 응답까지의 전체 사이클을 로컬 파이프라인과 FastAPI Slack 앱으로 운영한다.
 
----
+Activepieces 연동은 사용하지 않는다. Slack 연동은 ngrok public URL을 통해 `slack_interactive_app.py`가 직접 처리한다.
 
-## 💾 2. 디스크 기반 영구 메모리 제어 지침 (State Management)
-루프가 시작되면 가장 먼저 `./data/pipeline_state.json` 파일을 파싱하여 컨텍스트를 동기화하라.
+## 루프 환경
 
-* **읽기 프로토콜:** * `last_processed_id`: 이전 루프에서 최종 성공한 플랫폼별 마지막 공고 UID를 확인하여 금일 수집 시 중복을 원천 차단하라.
-    * `user_profile_hash`: 유저 프로필 파일의 변경 여부를 체크하여 스코어링 가중치를 최신화하라.
-* **쓰기 프로토콜:** 루프 내 각 단계가 성공할 때마다 상태 파일의 `current_phase` 값을 `[FETCH] ➔ [ENRICH] ➔ [SCORE] ➔ [VERIFY] ➔ [DISPATCH]` 순으로 실시간 업데이트하여 불시의 서버 다운 시에도 해당 지점부터 **체크포인트 재시작(Resilience)**이 가능하도록 하라.
+- 작업 디렉터리: `workspace/recruiting-pipeline`
+- 영구 상태: `data/pipeline_state.json`
+- 수집 DB: `data/recruitment.db`
+- Slack 사용자 DB: `data/slack_user_profiles.db`
+- 중간 산출물: `_workspace/*.json`
 
----
+## 상태 관리
 
-## 📋 3. 이터레이티브 스킬 셋 (Iterative Skills)
+루프 시작 시 `pipeline_state.json`을 읽고 아래 값을 기준으로 재개한다.
 
-### [Phase 1: FETCH - 수집 및 이원화 분기]
-* 하네스 인프라에 내장된 Scrapy 및 Playwright-Stealth 도구를 활성화하라.
-* `사람인/워크넷 API`에서 데이터를 가져오고, `원티드/리멤버`는 웹 API 역추적 스크립트를 실행하라.
-* `pipeline_state.json`의 `last_processed_id`와 대조하여 **새로 올라온 공고만 필터링한 Raw JSON 배열**을 생성하라.
+- `current_phase`
+- `last_processed_id`
+- `sent_job_ids`
+- `user_profile_hash`
 
-### [Phase 2: ENRICH - Activepieces 위임 및 외부 데이터 매핑]
-* Activepieces 웹훅을 트리거하여 수집된 `company`명을 Key로 삼아 외부 도구를 실행하라.
-* `DART API`에서 기업 규모 및 주요 사업 섹션을 분석하고, `국민연금 공공 데이터`에서 1년 고용 성장 추이를 매핑하여 가공용 통합 JSON을 완성하라.
+각 단계 진입 시 `current_phase`를 즉시 저장한다.
 
-### [Phase 3: SCORE - ChatGPT 기반 초개인화 정형화 연산]
-* OpenAI 엔진 호출 시 `response_format: { "type": "json_object" }` (Structured Outputs) 옵션을 강제 적용하라.
-* 로컬에 저장된 유저 프로필 데이터(고정변인)와 공고의 상세 JD 간 **코사인 유사도(Cosine Similarity)**를 연산하여 100점 만점의 `fit_score`를 계산하라.
-* 상세 JD 3줄 요약 및 기업의 중장기 비전 키워드를 추출하여 정형화된 JSON 필드에 주입하라.
+```text
+FETCH -> ENRICH -> SCORE -> VERIFY -> DISPATCH -> IDLE
+```
 
----
+현재 `DISPATCH`는 외부 webhook 전송이 아니라, `verify_output.json`을 `final_recruit_dashboard.json`으로 확정하고 처리 완료 상태를 기록하는 단계다.
 
-## ⚖️ 4. 서브 에이전트 교차 검증 및 무한 루프 방지 (Verifier Loop)
+## 단계별 역할
 
-데이터 오염과 할루시네이션을 방지하기 위해, 최종 슬랙 송출 전 **'내부 검사역 서브 에이전트(Verifier)'** 프로세스를 독립적으로 분리하여 셀프 QA를 수행한다.
-* **최종 액션:** Activepieces Webhook을 통해 지정된 Slack 채널로 대시보드 메시지를 발송하고, 완료된 공고의 ID와 타임스탬프를 `pipeline_state.json` 디스크 메모리에 갱신한 뒤 현재 루프를 종료(Sleep)하라.
+### FETCH
+
+- `crawler.py`로 JobKorea, Saramin, Incruit 공고를 수집한다.
+- 공고는 SQLite `jobs` 테이블에 저장한다.
+- 미처리 공고는 `_workspace/fetch_output.json`으로 출력한다.
+- `sent_job_ids`와 DB 중복키를 이용해 이미 처리한 공고를 제외한다.
+
+### ENRICH
+
+- `enricher.py`로 기업 규모, 산업, 안정성, 성장 맥락을 보강한다.
+- 로컬 DART/국민연금 캐시를 우선 사용한다.
+- OpenAI API가 설정된 경우에만 LLM 보강을 사용한다.
+
+### SCORE
+
+- `scorer.py`로 공고를 Slack payload schema에 맞춰 정형화한다.
+- 자격요건, 우대요건, 직무기술서는 원문 전체가 아니라 핵심 요약으로 압축한다.
+- 사용자 프로필과 공고 내용을 비교해 `fit_score`를 계산한다.
+
+### VERIFY
+
+- `verifier.py`로 필수 필드, 타입, 마감일 정합성, 부실 fallback 문구, placeholder 키워드를 검사한다.
+- 실패 시 `scorer.py`를 재실행하며 최대 3회까지 보정한다.
+
+### DISPATCH
+
+- 외부 서비스로 전송하지 않는다.
+- `verify_output.json`을 `final_recruit_dashboard.json`으로 저장한다.
+- 처리 완료 공고의 `sent_job_ids`, `last_processed_id`, DB `sent_status`를 갱신한다.
+- Slack 화면 출력은 `slack_interactive_app.py`가 `/slack/interactive`와 `/slack/command`에서 직접 처리한다.
+
+## Slack 직접 연동
+
+### FastAPI endpoints
+
+- `POST /slack/interactive`: 버튼과 모달 interaction 처리
+- `POST /slack/command`: `/recruit` slash command 처리
+- `GET /slack/launcher-blocks`: 런처 Block Kit JSON 반환
+- `GET /health`: 상태 확인
+
+### Slash Command
+
+```text
+/recruit
+/recruit 업데이트
+/recruit 검색
+/recruit 프로필
+/recruit 설정
+```
+
+### 환경 변수
+
+- `SLACK_BOT_TOKEN`
+- 선택: `OPENAI_API_KEY`
+
+토큰과 DB, 중간 산출물은 커밋하지 않는다.

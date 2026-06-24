@@ -1,0 +1,237 @@
+{
+  "type": "modal",
+  "callback_id": "modal_search_preferences",
+  "title": {
+    "type": "plain_text",
+    "text": "검색 환경설정"
+  },
+  "submit": {
+    "type": "plain_text",
+    "text": "저장하기"
+  },
+  "close": {
+    "type": "plain_text",
+    "text": "취소"
+  },
+  "blocks": [
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "맞춤 공고 검색과 실시간 푸시 알림 조건을 설정합니다."
+      }
+    },
+    {
+      "type": "input",
+      "optional": true,
+      "block_id": "blk_notifications",
+      "label": {
+        "type": "plain_text",
+        "text": "알림 및 검색 주기/피드백"
+      },
+      "element": {
+        "type": "checkboxes",
+        "action_id": "input_notifications",
+        "options": [
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "실시간 업데이트 푸시 알림 받기"
+            },
+            "value": "push_enabled"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "마감 임박 공고 포함 (D-3 이내)"
+            },
+            "value": "include_imminent_deadlines"
+          }
+        ]
+      }
+    },
+    {
+      "type": "input",
+      "optional": true,
+      "block_id": "blk_excluded_sites",
+      "label": {
+        "type": "plain_text",
+        "text": "검색결과에서 제외할 채용사이트"
+      },
+      "element": {
+        "type": "checkboxes",
+        "action_id": "input_excluded_sites",
+        "options": [
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "잡코리아"
+            },
+            "value": "JobKorea"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "사람인"
+            },
+            "value": "Saramin"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "인크루트"
+            },
+            "value": "Incruit"
+          }
+        ]
+      }
+    },
+    {
+      "type": "input",
+      "optional": true,
+      "block_id": "blk_excluded_keywords",
+      "label": {
+        "type": "plain_text",
+        "text": "제외 키워드 (쉼표로 구분)"
+      },
+      "element": {
+        "type": "plain_text_input",
+        "action_id": "input_excluded_keywords",
+        "multiline": false,
+        "placeholder": {
+          "type": "plain_text",
+          "text": "예시) 영업, 계약직, 파견"
+        }
+      }
+    },
+    {
+      "type": "input",
+      "optional": true,
+      "block_id": "blk_employment_types",
+      "label": {
+        "type": "plain_text",
+        "text": "고용 형태 필터"
+      },
+      "element": {
+        "type": "checkboxes",
+        "action_id": "input_employment_types",
+        "options": [
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "정규직"
+            },
+            "value": "정규직"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "계약직"
+            },
+            "value": "계약직"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "인턴"
+            },
+            "value": "인턴"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "기타"
+            },
+            "value": "기타"
+          }
+        ]
+      }
+    },
+    {
+      "type": "input",
+      "optional": true,
+      "block_id": "blk_career_types",
+      "label": {
+        "type": "plain_text",
+        "text": "신입/경력 여부 필터"
+      },
+      "element": {
+        "type": "checkboxes",
+        "action_id": "input_career_types",
+        "options": [
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "신입"
+            },
+            "value": "신입"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "경력 무관"
+            },
+            "value": "경력 무관"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "경력직"
+            },
+            "value": "경력직"
+          }
+        ]
+      }
+    },
+    {
+      "type": "input",
+      "optional": true,
+      "block_id": "blk_career_periods",
+      "label": {
+        "type": "plain_text",
+        "text": "경력직 선택 시 경력 기간 필터"
+      },
+      "element": {
+        "type": "checkboxes",
+        "action_id": "input_career_periods",
+        "options": [
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "3년 미만"
+            },
+            "value": "3년 미만"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "3년 ~ 5년"
+            },
+            "value": "3년 ~ 5년"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "5년 ~ 8년"
+            },
+            "value": "5년 ~ 8년"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "8년 ~ 11년"
+            },
+            "value": "8년 ~ 11년"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "11년 이상"
+            },
+            "value": "11년 이상"
+          }
+        ]
+      }
+    }
+  ]
+}

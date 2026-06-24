@@ -22,7 +22,17 @@ DEFAULT_USER_PROFILE = {
 
 client = init_openai_client("scorer")
 
-TEXT_POOR_MARKERS = ("참조", "분석 생략", "분석 실패", "정보없음", "추출 불가")
+TEXT_POOR_MARKERS = (
+    "참조",
+    "분석 생략",
+    "분석 실패",
+    "정보없음",
+    "추출 불가",
+    "원본 공고 확인 필요",
+    "공고 상세 직무 내용 확인 필요",
+    "상세 자격요건은 원본",
+    "우대요건은 원본",
+)
 GENERIC_REQUIREMENTS = {
     "공고 자격요건 및 전공 요건 참조",
     "자격요건 참조",
@@ -32,6 +42,22 @@ GENERIC_PREFERENCES = {
     "우대사항 참조",
 }
 GENERIC_KEYWORDS = {"#직무역량", "#자소서작성", "#성장가능성", "#성장지향", "#자소서팁"}
+OUTPUT_SCHEMA_KEYS = [
+    "dispatch_type",
+    "slack_user_id",
+    "company",
+    "title",
+    "employment_type",
+    "location",
+    "salary",
+    "requirements",
+    "preferences",
+    "jd_summary",
+    "job_keywords",
+    "detail_url",
+    "company_career_url",
+    "image_url",
+]
 SECTION_HEADINGS = (
     "주요업무", "담당업무", "업무내용", "직무내용", "수행업무", "역할",
     "상세요강", "모집부문", "모집분야", "직무기술서",
@@ -158,6 +184,96 @@ def sanitize_jd_text(value):
     return text
 
 
+def is_fallback_text(value):
+    text = clean_text(value)
+    return any(marker in text for marker in TEXT_POOR_MARKERS)
+
+
+def format_salary_amount(amount):
+    try:
+        number = int(str(amount).replace(",", ""))
+    except Exception:
+        return ""
+    return f"{number:,}만원"
+
+
+def extract_salary_text(*values):
+    text = clean_text(" ".join(str(value or "") for value in values))
+    if not text:
+        return ""
+    if re.search(r"회사\s*내규|내규에\s*따름|면접\s*후|협의|추후협의|미정", text):
+        return "회사내규에 따름"
+    range_match = re.search(r"(\d{3,5})\s*(?:~|-|부터|이상)\s*(\d{3,5})\s*만원", text)
+    if range_match:
+        return f"{format_salary_amount(range_match.group(1))}~{format_salary_amount(range_match.group(2))}"
+    amount_match = re.search(r"(\d{1,3}(?:,\d{3})+|\d{3,5})\s*(?:만원|만\s*원)", text)
+    if amount_match:
+        return format_salary_amount(amount_match.group(1))
+    annual_match = re.search(r"연봉\s*(\d{3,5})", text)
+    if annual_match:
+        return format_salary_amount(annual_match.group(1))
+    return ""
+
+
+def extract_location_text(*values):
+    text = clean_text(" ".join(str(value or "") for value in values))
+    matches = [
+        match.group(0).strip()
+        for match in re.finditer(
+            r"(?:서울|경기|인천|부산|대구|대전|광주|울산|세종|강원|충북|충남|전북|전남|경북|경남|제주)(?:\s*[가-힣]{1,5}(?:구|군|시))?",
+            text,
+        )
+    ]
+    return ", ".join(dedupe_preserve_order(matches[:3]))
+
+
+def normalize_schema_payload(payload, dispatch_type="PUSH", slack_user_id=""):
+    payload = payload.copy()
+    payload["dispatch_type"] = dispatch_type
+    payload["slack_user_id"] = slack_user_id or payload.get("slack_user_id", "")
+
+    salary = extract_salary_text(payload.get("salary", ""), payload.get("requirements", ""), payload.get("jd_summary", ""))
+    payload["salary"] = salary or clean_text(payload.get("salary", "")) or "회사내규에 따름"
+
+    location = extract_location_text(payload.get("location", ""))
+    payload["location"] = location or clean_text(payload.get("location", "")) or "근무지역 확인 필요"
+
+    keywords = payload.get("job_keywords", [])
+    if not isinstance(keywords, list):
+        keywords = [keywords] if keywords else []
+    keywords = [str(keyword) if str(keyword).startswith("#") else f"#{keyword}" for keyword in keywords if clean_text(keyword)]
+    keywords = [keyword for keyword in dedupe_preserve_order(keywords) if keyword not in GENERIC_KEYWORDS]
+    if len(keywords) < 3:
+        keywords = dedupe_preserve_order(keywords + ["#채용공고분석", "#기업비전", "#직무적합성"])
+    payload["job_keywords"] = keywords[:5]
+
+    image_url = sanitize_image_url(payload.get("image_url", ""))
+    jd_summary = sanitize_jd_text(payload.get("jd_summary", ""))
+    if (not jd_summary or "참조" in jd_summary or len(jd_summary) < 12 or is_poor_text(jd_summary)) and image_url:
+        payload["jd_summary"] = f"<{image_url}|🖼️ 채용 공고 원본 이미지 확인하기 (클릭 시 이동)>"
+    else:
+        payload["jd_summary"] = jd_summary or "공고 상세 직무 내용 확인 필요"
+    payload["image_url"] = image_url
+
+    defaults = {
+        "company": "",
+        "title": "",
+        "employment_type": "정규직",
+        "requirements": "자격요건 확인 필요",
+        "preferences": "우대요건 확인 필요",
+        "detail_url": "",
+        "company_career_url": "",
+    }
+    for key, value in defaults.items():
+        payload[key] = clean_text(payload.get(key, "")) or value
+
+    ordered = {key: payload.get(key, "") for key in OUTPUT_SCHEMA_KEYS}
+    for key, value in payload.items():
+        if key not in ordered:
+            ordered[key] = value
+    return ordered
+
+
 def is_poor_text(value):
     text = clean_text(value)
     if not text or len(text) < 12:
@@ -196,7 +312,7 @@ def trim_summary(text, limit=120):
 
 
 def is_boilerplate_unit(text):
-    return any(skip in text for skip in [
+    return is_fallback_text(text) or any(skip in text for skip in [
         "본 정보는 인크루트",
         "게재된 채용기업",
         "구직활동 이외의 용도",
@@ -289,6 +405,12 @@ def normalized_dedupe(values):
 def summarize_long_field(text, field, title="", limit=None):
     text = clean_text(text)
     if not text:
+        return ""
+    if is_fallback_text(text):
+        if field == "requirements":
+            return "원본 공고 확인 필요"
+        if field == "preferences":
+            return "공고상 별도 우대요건 미기재"
         return ""
 
     limits = {
@@ -384,14 +506,14 @@ def summarize_long_field(text, field, title="", limit=None):
 
 def extract_requirements_summary(jd_text, title=""):
     if is_poor_text(jd_text):
-        return trim_summary(f"{title} 관련 상세 자격요건은 원본 공고 확인 필요", 100)
+        return "원본 공고 확인 필요"
     section = extract_heading_section(jd_text, ["자격요건", "지원자격", "필수요건", "필수사항", "응시자격", "기본요건", "지원요건", "requirements", "qualifications", "Required Qualifications", "Basic Qualifications"])
     return summarize_long_field(section or jd_text, "requirements", title)
 
 
 def extract_preferences_summary(jd_text, title=""):
     if is_poor_text(jd_text):
-        return trim_summary(f"{title} 관련 우대요건은 원본 공고 확인 필요", 100)
+        return "공고상 별도 우대요건 미기재"
     section = extract_heading_section(jd_text, ["우대사항", "우대조건", "우대요건", "우대자격", "preferred", "Preferred Qualifications", "Preferences", "plus"])
     if not section and not re.search(r"우대|preferred|plus", jd_text, flags=re.IGNORECASE):
         return "공고상 별도 우대요건 미기재"
@@ -485,6 +607,8 @@ def should_accept_candidate_field(key, value):
     text = clean_text(value)
     if not text:
         return False
+    if key in {"requirements", "preferences", "jd_summary"} and is_fallback_text(text):
+        return False
     if key == "requirements" and text in GENERIC_REQUIREMENTS:
         return False
     if key == "preferences" and text in GENERIC_PREFERENCES:
@@ -532,11 +656,14 @@ def build_base_job_data(item, profile, fallback_jd_summary):
     locs = as_list(extracted.get("location"), ["서울"])
     
     payload = {
+        "dispatch_type": "PUSH",
+        "slack_user_id": "",
+        "platform": item.get("platform", ""),
         "company": company,
         "title": title,
         "employment_type": deep_data.get("employment_type", "정규직"),
         "location": ", ".join(str(loc) for loc in locs),
-        "salary": "회사내규에 따름",
+        "salary": extract_salary_text(deep_data.get("jd_summary", ""), item.get("title", "")) or "회사내규에 따름",
         "requirements": requirements,
         "preferences": preferences,
         "jd_summary": fallback_jd_summary,
@@ -588,7 +715,7 @@ def normalize_refined_data(item, profile, candidate, fallback_jd_summary):
     elif (not jd_val or "참조" in jd_val or len(jd_val) < 12) and image_url:
         payload["jd_summary"] = f"<{image_url}|🖼️ 채용 공고 원본 이미지 확인하기 (클릭 시 이동)>"
     elif not jd_val or is_poor_text(jd_val):
-        payload["jd_summary"] = "공고 상세 직무 내용 확인 필요"
+        payload["jd_summary"] = f"<{image_url}|🖼️ 채용 공고 원본 이미지 확인하기 (클릭 시 이동)>" if image_url else "공고 상세 직무 내용 확인 필요"
     else:
         payload["jd_summary"] = summarize_long_field(payload["jd_summary"], "jd_summary", item.get("title", ""))
 
@@ -609,7 +736,7 @@ def normalize_refined_data(item, profile, candidate, fallback_jd_summary):
     fit_score, location_matched = calculate_fit_score(item, profile)
     payload["fit_score"] = fit_score
     payload.update(build_architecture_fields(item, payload, location_matched))
-    return payload
+    return normalize_schema_payload(payload, "PUSH", payload.get("slack_user_id", ""))
 
 def analyze_job_with_llm(item, profile):
     company = item.get("company", "")
@@ -643,6 +770,8 @@ Output must be in JSON format matching the schema.
 Skills: {profile.get("skills", [])}
 Preferred Locations: {profile.get("location_pref", [])}
 Education: {profile.get("education", "")}
+Desired Salary: {profile.get("desired_salary") or profile.get("희망연봉", "")}
+Certifications: {profile.get("certifications") or profile.get("보유자격", [])}
 
 ### Job Listing Data:
 Company: {company}
@@ -657,8 +786,8 @@ Official Listing Details URL (Original Site): {deep_data.get("official_detail_ur
 
 ### Instructions for fields:
 - employment_type: extract work type (e.g. 정규직/계약직/인턴)
-- location: exact work location/region
-- salary: salary information (use "회사내규에 따름" if not explicitly specified or if negotiations are required)
+- location: exact work location/region as one normalized text value (e.g. "서울 강남구")
+- salary: salary information as one normalized text value with numbers when present (e.g. "4,500만원"; use "회사내규에 따름" if not explicitly specified or if negotiations are required)
 - requirements: summary of minimum qualifications / requirements
 - preferences: summary of preferred skills / qualities
 - jd_summary:
@@ -674,6 +803,8 @@ Official Listing Details URL (Original Site): {deep_data.get("official_detail_ur
 
 JSON schema:
 {{
+  "dispatch_type": "PUSH",
+  "slack_user_id": "",
   "company": "string",
   "title": "string",
   "employment_type": "string",
