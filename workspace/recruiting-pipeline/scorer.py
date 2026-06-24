@@ -34,8 +34,11 @@ GENERIC_PREFERENCES = {
 GENERIC_KEYWORDS = {"#직무역량", "#자소서작성", "#성장가능성", "#성장지향", "#자소서팁"}
 SECTION_HEADINGS = (
     "주요업무", "담당업무", "업무내용", "직무내용", "수행업무", "역할",
-    "자격요건", "지원자격", "필수요건", "필수사항", "응시자격",
-    "우대사항", "우대조건", "우대요건", "preferred",
+    "상세요강", "모집부문", "모집분야", "직무기술서",
+    "Responsibilities", "Job Description", "Job Details",
+    "자격요건", "지원자격", "필수요건", "필수사항", "응시자격", "기본요건", "지원요건",
+    "Qualifications", "Required Qualifications", "Basic Qualifications",
+    "우대사항", "우대조건", "우대요건", "우대자격", "Preferred Qualifications", "Preferences", "preferred",
     "복리후생", "근무조건", "전형절차"
 )
 JOB_SKILL_KEYWORDS = [
@@ -167,11 +170,13 @@ def split_chunks(text):
     if not text:
         return []
     normalized = re.sub(r"\s*[•ㆍ·]\s*", "\n", text)
-    normalized = re.sub(r"\s+(?=(?:주요업무|담당업무|자격요건|지원자격|필수요건|우대사항|우대조건|복리후생)\s*[:：])", "\n", normalized)
+    normalized = re.sub(r"\s+(?=\[?\s*(?:주요업무|담당업무|자격요건|지원자격|필수요건|기본요건|우대사항|우대조건|우대요건|상세요강|모집부문|직무기술서|Responsibilities|Job Description|Qualifications|Required Qualifications|Preferred Qualifications|복리후생)\s*\]?\s*[:：]?)", "\n", normalized, flags=re.IGNORECASE)
     raw_chunks = re.split(r"[\n;]|(?<=[.!?。])\s+", normalized)
     chunks = []
     for chunk in raw_chunks:
         chunk = clean_text(chunk.strip(" -·ㆍ•"))
+        if is_boilerplate_unit(chunk):
+            continue
         if 8 <= len(chunk) <= 260:
             chunks.append(chunk)
     if not chunks and text:
@@ -190,12 +195,26 @@ def trim_summary(text, limit=120):
     return cut.rstrip(" ,/") + "..."
 
 
+def is_boilerplate_unit(text):
+    return any(skip in text for skip in [
+        "본 정보는 인크루트",
+        "게재된 채용기업",
+        "구직활동 이외의 용도",
+        "지금 본 공고에 관심있는 지원자",
+        "사람인에서 수집한 공고",
+        "정보 수정이 필요할 경우",
+        "정확한 상세요강은 반드시",
+        "지원자 통계를 확인",
+    ])
+
+
 def extract_heading_section(text, headings):
     source = clean_text(text)
     if not source:
         return ""
-    heading_pattern = "|".join(re.escape(h) for h in headings)
-    stop_pattern = "|".join(re.escape(h) for h in SECTION_HEADINGS if h not in headings)
+    boundary = r"(?![가-힣A-Za-z0-9])"
+    heading_pattern = "|".join(r"\[?\s*" + re.escape(h) + r"\s*\]?" + boundary for h in headings)
+    stop_pattern = "|".join(r"\[?\s*" + re.escape(h) + r"\s*\]?" + boundary for h in SECTION_HEADINGS if h not in headings)
     pattern = rf"(?:{heading_pattern})\s*[:：]?\s*(.*?)(?=(?:{stop_pattern})\s*[:：]?|$)"
     match = re.search(pattern, source, re.IGNORECASE)
     if match:
@@ -221,15 +240,18 @@ def split_summary_units(text):
     text = clean_text(text)
     if not text:
         return []
+    text = re.sub(r"\s*[•ㆍ·○]\s*", "\n", text)
     text = re.sub(r"\s+(?=\d+\))", "\n", text)
     text = re.sub(r"\s+(?=-\s)", "\n", text)
-    text = re.sub(r"\s+(?=(?:우대사항|자격요건|지원자격|주요업무|담당업무)\s*[:：])", "\n", text)
+    text = re.sub(r"\s+(?=\[?\s*(?:우대사항|우대조건|우대요건|우대자격|자격요건|지원자격|기본요건|지원요건|주요업무|담당업무|상세요강|모집부문|직무기술서|Responsibilities|Job Description|Qualifications|Required Qualifications|Preferred Qualifications)\s*\]?\s*[:：]?)", "\n", text, flags=re.IGNORECASE)
     raw_units = re.split(r"[\n;]|(?<=[.!?。])\s+", text)
     units = []
     for unit in raw_units:
         unit = clean_text(unit.strip(" -·ㆍ•"))
         unit = re.sub(r"^\d+\)\s*", "", unit)
-        unit = re.sub(r"^(?:우대사항|자격요건|지원자격|주요업무|담당업무)\s*[:：]\s*", "", unit)
+        unit = re.sub(r"^\[?\s*(?:우대사항|우대조건|우대요건|우대자격|자격요건|지원자격|기본요건|지원요건|주요업무|담당업무|상세요강|모집부문|직무기술서|Responsibilities|Job Description|Qualifications|Required Qualifications|Preferred Qualifications)\s*\]?\s*[:：]?\s*", "", unit, flags=re.IGNORECASE)
+        if is_boilerplate_unit(unit):
+            continue
         if 4 <= len(unit) <= 180:
             units.append(unit)
     return units
@@ -278,6 +300,30 @@ def summarize_long_field(text, field, title="", limit=None):
 
     if field == "requirements":
         facts = []
+        if re.search(r"학력\s*무관", text):
+            facts.append("학력 무관")
+        for match in re.findall(r"(?:4년제\s*)?대졸\s*(?:이상|↑)|학력무관", text):
+            facts.append(match.replace(" ", ""))
+        if re.search(r"(?:신입|경력)\s*(?:/|ㆍ|·|,)?", text):
+            facts.append(re.search(r"(?:신입|경력)\s*(?:/|ㆍ|·|,)?", text).group(0).strip(" /ㆍ·,"))
+        for match in re.findall(r"(?:관련)?경력\s*\d+\s*년\s*[~\-]\s*\d+\s*년|경력\s*\d+\s*년\s*이상|\d+\s*년\s*이상", text):
+            facts.append(match)
+        if re.search(r"공인\s*어학성적|TOEIC|TEPS|TOEFL|G-TELP|FLEX", text, flags=re.IGNORECASE):
+            facts.append("공인어학성적 보유")
+        major_match = re.search(r"((?:컴퓨터|인공지능|산업공학|통계|로봇|기계공학|전자공학|정보통신공학)[^。\n]{0,55}전공자)", text)
+        if major_match:
+            facts.append(trim_summary(major_match.group(1), 45))
+        skill_hits = []
+        for token in ["Python", "JavaScript", "TypeScript", "FastAPI", "React", "RAG", "Prompt Engineering", "Docker", "CI/CD", "PyTorch", "JAX", "ROS", "LLM"]:
+            if re.search(re.escape(token), text, flags=re.IGNORECASE):
+                skill_hits.append(token)
+        if skill_hits:
+            facts.append("/".join(normalized_dedupe(skill_hits)[:4]))
+        if any(re.search(r"경력\s*\d", fact) for fact in facts):
+            facts = [fact for fact in facts if fact != "경력"]
+        strong_facts = normalized_dedupe(facts)
+        if len(strong_facts) >= 3:
+            return trim_summary(", ".join(strong_facts[:4]), limit)
         for match in re.findall(r"(?:초대졸|전문학사|학사|석사|박사)\s*이상", text, flags=re.IGNORECASE):
             facts.append(match)
         if re.search(r"신입\s*[·/]\s*경력", text):
@@ -289,6 +335,8 @@ def summarize_long_field(text, field, title="", limit=None):
         for match in re.findall(r"\d+\s*년\s*이상", text):
             facts.append(match)
         for match in re.findall(r"(?:전공|학과)\s*[:：]?\s*[^/,\n]{2,35}", text):
+            if any(skip in match for skip in ["전공시험", "면접", "임용"]):
+                continue
             facts.append(match)
         for match in re.findall(r"(?:Python|SQL|AI|ML|LLM|Java|React|Spring|MLOps|클라우드|데이터)[^/,\n]{0,20}", text, flags=re.IGNORECASE):
             facts.append(match)
@@ -297,10 +345,18 @@ def summarize_long_field(text, field, title="", limit=None):
         return trim_summary(summary or f"{title} 관련 핵심 자격요건 확인 필요", limit)
 
     if field == "preferences":
+        if "별도 우대요건 미기재" in text:
+            return "공고상 별도 우대요건 미기재"
+        preferred_hits = []
+        for token in ["LeRobot", "ALOHA", "Jetson", "TensorRT", "Isaac Sim", "MuJoCo", "RAG", "Prompt Engineering", "Docker", "CI/CD", "영어", "협업"]:
+            if re.search(re.escape(token), text, flags=re.IGNORECASE):
+                preferred_hits.append(token)
+        if preferred_hits:
+            return trim_summary(", ".join(normalized_dedupe(preferred_hits)[:4]) + " 경험 우대", limit)
         units = pick_units(text, ["우대", "경험", "경력자", "프로젝트", "자격증", "분석", "개선", "협업", "영어"], 3)
         cleaned_units = []
         for unit in units:
-            unit = re.sub(r"^(?:우대사항|우대조건|우대요건)\s*[:：]?\s*", "", unit)
+            unit = re.sub(r"^\[?\s*(?:우대사항|우대조건|우대요건|우대자격)\s*\]?\s*[:：]?\s*", "", unit)
             unit = clean_text(unit).strip(" ,/")
             cleaned_units.append(unit)
         summary = ", ".join(normalized_dedupe(cleaned_units)[:3])
@@ -314,11 +370,13 @@ def summarize_long_field(text, field, title="", limit=None):
             if "부문 " in role_text:
                 role_text = role_text.split("부문 ", 1)[0] + "부문"
             return trim_summary(role_text, limit)
-    units = pick_units(text, ["담당", "개발", "운영", "분석", "기획", "관리", "구축", "개선", "지원", "연구", "생산"], 4)
+    units = pick_units(text, ["담당", "개발", "운영", "분석", "기획", "관리", "구축", "개선", "지원", "연구", "생산", "AI", "Agent", "Platform", "Engineer", "LLM", "RAG"], 4)
     if field == "jd_summary":
         units = [
             unit for unit in units
             if not any(skip in unit for skip in ["경영이념", "행복을 추구", "가치 창출", "성장해 나갈", "계열사로서"])
+            and not ("채용공고" in unit and not re.search(r"개발|운영|분석|기획|관리|Agent|Platform|Engineer", unit, re.IGNORECASE))
+            and not (re.search(r"^\d{4}년도\s+정규직", unit) and not re.search(r"개발|운영|분석|기획|관리|Agent|Platform|Engineer", unit, re.IGNORECASE))
         ] or units[:2]
     summary = " / ".join(normalized_dedupe(units)[:2])
     return trim_summary(summary or text, limit)
@@ -327,21 +385,23 @@ def summarize_long_field(text, field, title="", limit=None):
 def extract_requirements_summary(jd_text, title=""):
     if is_poor_text(jd_text):
         return trim_summary(f"{title} 관련 상세 자격요건은 원본 공고 확인 필요", 100)
-    section = extract_heading_section(jd_text, ["자격요건", "지원자격", "필수요건", "필수사항", "응시자격", "requirements", "qualifications"])
+    section = extract_heading_section(jd_text, ["자격요건", "지원자격", "필수요건", "필수사항", "응시자격", "기본요건", "지원요건", "requirements", "qualifications", "Required Qualifications", "Basic Qualifications"])
     return summarize_long_field(section or jd_text, "requirements", title)
 
 
 def extract_preferences_summary(jd_text, title=""):
     if is_poor_text(jd_text):
         return trim_summary(f"{title} 관련 우대요건은 원본 공고 확인 필요", 100)
-    section = extract_heading_section(jd_text, ["우대사항", "우대조건", "우대요건", "preferred", "plus"])
+    section = extract_heading_section(jd_text, ["우대사항", "우대조건", "우대요건", "우대자격", "preferred", "Preferred Qualifications", "Preferences", "plus"])
+    if not section and not re.search(r"우대|preferred|plus", jd_text, flags=re.IGNORECASE):
+        return "공고상 별도 우대요건 미기재"
     return summarize_long_field(section or jd_text, "preferences", title)
 
 
 def summarize_jd_text(jd_text, title=""):
     if is_poor_text(jd_text):
         return ""
-    section = extract_heading_section(jd_text, ["주요업무", "담당업무", "업무내용", "직무내용", "수행업무", "역할"])
+    section = extract_heading_section(jd_text, ["주요업무", "담당업무", "업무내용", "직무내용", "수행업무", "역할", "상세요강", "모집부문", "모집분야", "직무기술서", "Responsibilities", "Job Description", "Job Details"])
     summary = summarize_long_field(section or jd_text, "jd_summary", title)
     if not summary and title:
         return trim_summary(f"{title} 포지션의 주요 업무 수행", 120)

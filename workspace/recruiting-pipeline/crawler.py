@@ -27,8 +27,12 @@ JOBKOREA_CHUNK_RE = re.compile(
 )
 JOB_SECTION_HEADINGS = (
     "주요업무", "담당업무", "업무내용", "직무내용", "수행업무", "역할",
-    "자격요건", "지원자격", "필수요건", "필수사항", "응시자격",
-    "우대사항", "우대조건", "우대요건", "복리후생", "근무조건", "전형절차"
+    "상세요강", "모집부문", "모집분야", "직무기술서",
+    "Responsibilities", "Job Description", "Job Details",
+    "자격요건", "지원자격", "필수요건", "필수사항", "응시자격", "기본요건", "지원요건",
+    "Qualifications", "Required Qualifications", "Basic Qualifications",
+    "우대사항", "우대조건", "우대요건", "우대자격", "Preferred Qualifications", "Preferences",
+    "복리후생", "근무조건", "전형절차"
 )
 
 def get_normalized_key(company, title):
@@ -84,8 +88,9 @@ def extract_heading_section(text, headings):
     source = compact_text(text)
     if not source:
         return ""
-    heading_pattern = "|".join(re.escape(h) for h in headings)
-    stop_pattern = "|".join(re.escape(h) for h in JOB_SECTION_HEADINGS if h not in headings)
+    boundary = r"(?![가-힣A-Za-z0-9])"
+    heading_pattern = "|".join(r"\[?\s*" + re.escape(h) + r"\s*\]?" + boundary for h in headings)
+    stop_pattern = "|".join(r"\[?\s*" + re.escape(h) + r"\s*\]?" + boundary for h in JOB_SECTION_HEADINGS if h not in headings)
     pattern = rf"(?:{heading_pattern})\s*[:：]?\s*(.*?)(?=(?:{stop_pattern})\s*[:：]?|$)"
     match = re.search(pattern, source, re.IGNORECASE)
     return compact_text(match.group(1)) if match else ""
@@ -101,15 +106,15 @@ def trim_text(text, limit=900):
 def extract_job_detail_fields(text):
     return {
         "responsibilities": trim_text(
-            extract_heading_section(text, ["주요업무", "담당업무", "업무내용", "직무내용", "수행업무", "역할"]),
+            extract_heading_section(text, ["주요업무", "담당업무", "업무내용", "직무내용", "수행업무", "역할", "상세요강", "모집부문", "모집분야", "직무기술서", "Responsibilities", "Job Description", "Job Details"]),
             900,
         ),
         "requirements": trim_text(
-            extract_heading_section(text, ["자격요건", "지원자격", "필수요건", "필수사항", "응시자격"]),
+            extract_heading_section(text, ["자격요건", "지원자격", "필수요건", "필수사항", "응시자격", "기본요건", "지원요건", "Qualifications", "Required Qualifications", "Basic Qualifications"]),
             900,
         ),
         "preferences": trim_text(
-            extract_heading_section(text, ["우대사항", "우대조건", "우대요건"]),
+            extract_heading_section(text, ["우대사항", "우대조건", "우대요건", "우대자격", "Preferred Qualifications", "Preferences"]),
             900,
         ),
     }
@@ -166,6 +171,89 @@ def fetch_jobkorea_description_chunks(raw_html, referer_url):
             "image_url": extract_image_from_markup(chunk_html, chunk_url),
         })
     return chunks
+
+
+def should_skip_embedded_url(value):
+    lower = str(value or "").lower()
+    if not lower:
+        return True
+    return any(token in lower for token in [
+        "google", "doubleclick", "facebook", "analytics", "adservice", "adn.",
+        "banner", "kakao", "naver.com/common", "youtube", "player", "map"
+    ])
+
+
+def collect_container_texts(soup, selectors):
+    parts = []
+    for selector in selectors:
+        for node in soup.select(selector):
+            text = extract_text_from_markup(str(node))
+            if has_useful_job_text(text):
+                parts.append(text)
+    return parts
+
+
+def fetch_embedded_documents(soup, base_url, referer_url, source_prefix):
+    records = []
+    for node in soup.select("iframe, frame, embed, object"):
+        src = node.get("src") or node.get("data")
+        if not src:
+            continue
+        embedded_url = urljoin(base_url, src)
+        if should_skip_embedded_url(embedded_url):
+            continue
+        embedded_html = fetch_html(embedded_url, referer=referer_url, timeout=20)
+        if not embedded_html:
+            continue
+        embedded_text = extract_text_from_markup(embedded_html)
+        embedded_image = extract_image_from_markup(embedded_html, embedded_url)
+        if has_useful_job_text(embedded_text) or embedded_image:
+            records.append({
+                "url": embedded_url,
+                "text": embedded_text,
+                "image_url": embedded_image,
+                "method": f"{source_prefix}_embedded_document",
+            })
+    return records
+
+
+def extract_platform_detail_sources(soup, raw_html, target_url, platform_name):
+    selectors_by_platform = {
+        "saramin": [
+            "div.jv_detail", "div.jv_cont", "div.wrap_jv_cont", "section.jv_cont",
+            "div.recruitment-summary", "div.user_content", "div.cont_recruit",
+            "div.view_contents", "div.job_description", "div.recruit_view",
+            "div.template_area", "div.job_view_content", "div.cont_box",
+        ],
+        "incruit": [
+            "#jobpost", ".jobpost", ".jobpostContents", ".recru_info", ".recru-details",
+            ".detailView", ".view_content", ".viewContents", ".job_view", ".job_info",
+            ".recruit_view", ".tb_job", ".read", ".ifrm", ".cont", ".detail",
+        ],
+    }
+    selectors = selectors_by_platform.get(platform_name, [])
+    records = []
+    container_text = merge_unique_text(collect_container_texts(soup, selectors))
+    if container_text:
+        records.append({
+            "url": target_url,
+            "text": container_text,
+            "image_url": extract_image_from_markup(raw_html, target_url),
+            "method": f"{platform_name}_detail_container",
+        })
+
+    records.extend(fetch_embedded_documents(soup, target_url, target_url, platform_name))
+    if not records:
+        text = extract_text_from_markup(raw_html)
+        image_url = extract_image_from_markup(raw_html, target_url)
+        if has_useful_job_text(text) or image_url:
+            records.append({
+                "url": target_url,
+                "text": text,
+                "image_url": image_url,
+                "method": f"{platform_name}_html_scan",
+            })
+    return records
 
 
 def render_with_playwright(url):
@@ -379,7 +467,19 @@ def fetch_html(url, referer=None, timeout=15):
     req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as response:
-            return response.read().decode('utf-8', 'ignore')
+            raw = response.read()
+            content_type = response.headers.get("Content-Type", "")
+            charset_match = re.search(r"charset=([\w-]+)", content_type, re.IGNORECASE)
+            encodings = []
+            if charset_match:
+                encodings.append(charset_match.group(1))
+            encodings.extend(["utf-8", "cp949", "euc-kr"])
+            for encoding in encodings:
+                try:
+                    return raw.decode(encoding)
+                except Exception:
+                    continue
+            return raw.decode("utf-8", "ignore")
     except Exception as e:
         print(f"Failed to fetch {url}: {e}", file=sys.stderr)
         return None
@@ -458,21 +558,34 @@ def deep_scrape_detail(url):
         }
 
     soup = BeautifulSoup(html, 'html.parser')
-    jobkorea_chunk_sources = []
+    detail_sources = []
     rendered_html = ""
     is_jobkorea = "jobkorea.co.kr" in target_url
+    is_saramin = "saramin.co.kr" in target_url
+    is_incruit = "incruit.com" in target_url
     if is_jobkorea:
-        jobkorea_chunk_sources = fetch_jobkorea_description_chunks(html, target_url)
+        detail_sources = [
+            {**chunk, "method": "jobkorea_description_chunk"}
+            for chunk in fetch_jobkorea_description_chunks(html, target_url)
+        ]
+    elif is_saramin:
+        detail_sources = extract_platform_detail_sources(soup, html, target_url, "saramin")
+    elif is_incruit:
+        detail_sources = extract_platform_detail_sources(soup, html, target_url, "incruit")
 
     # 1. Employment Type
     employment_type = "정규직"
-    chunk_text = merge_unique_text([chunk["text"] for chunk in jobkorea_chunk_sources])
-    text_content = merge_unique_text([soup.get_text("\n", strip=True), chunk_text])
-    if is_jobkorea and not has_useful_job_text(text_content):
-        rendered_html = render_with_playwright(target_url)
+    source_text = merge_unique_text([source.get("text", "") for source in detail_sources])
+    text_content = merge_unique_text([soup.get_text("\n", strip=True), source_text])
+    if (is_jobkorea or is_saramin or is_incruit) and not has_useful_job_text(text_content):
+        rendered_html = render_with_playwright(url if is_saramin else target_url)
         if rendered_html:
             rendered_text = extract_text_from_markup(rendered_html)
             text_content = merge_unique_text([text_content, rendered_text])
+            rendered_soup = BeautifulSoup(rendered_html, "html.parser")
+            platform_name = "saramin" if is_saramin else ("incruit" if is_incruit else "jobkorea")
+            detail_sources.extend(extract_platform_detail_sources(rendered_soup, rendered_html, url if is_saramin else target_url, platform_name))
+            source_text = merge_unique_text([source.get("text", "") for source in detail_sources])
     if "계약직" in text_content:
         employment_type = "계약직"
     elif "인턴" in text_content:
@@ -492,19 +605,19 @@ def deep_scrape_detail(url):
 
     # 3. JD Summary
     jd_summary_parts = []
-    jd_container = soup.select_one('.tbList, .artReadJobSum, .job-summary, .work-details, div.jv_detail, div.recru-details, div.job_description, div.content')
+    jd_container = soup.select_one('.tbList, .artReadJobSum, .job-summary, .work-details, div.jv_detail, div.jv_cont, div.wrap_jv_cont, div.recru-details, div.recru_info, div.jobpostContents, div.job_description, div.content')
     if jd_container:
         jd_summary_parts.append(jd_container.get_text("\n", strip=True))
     else:
         paragraphs = [p.get_text(strip=True) for p in soup.select('p, div.text') if len(p.get_text(strip=True)) > 20]
         if paragraphs:
             jd_summary_parts.append("\n".join(paragraphs[:6]))
-    if chunk_text:
-        jd_summary_parts.append(chunk_text)
+    if source_text:
+        jd_summary_parts.append(source_text)
     if rendered_html:
         rendered_soup = BeautifulSoup(rendered_html, "html.parser")
         rendered_container = rendered_soup.select_one(
-            '.tbList, .artReadJobSum, .job-summary, .work-details, div.jv_detail, div.recru-details, div.job_description, div.content'
+            '.tbList, .artReadJobSum, .job-summary, .work-details, div.jv_detail, div.jv_cont, div.wrap_jv_cont, div.recru-details, div.recru_info, div.jobpostContents, div.job_description, div.content'
         )
         if rendered_container:
             jd_summary_parts.append(rendered_container.get_text("\n", strip=True))
@@ -516,9 +629,9 @@ def deep_scrape_detail(url):
 
     # 4. 이미지 주소 스캔
     scraped_image_url = ""
-    for chunk in jobkorea_chunk_sources:
-        if chunk.get("image_url"):
-            scraped_image_url = chunk["image_url"]
+    for source in detail_sources:
+        if source.get("image_url"):
+            scraped_image_url = source["image_url"]
             break
     if not scraped_image_url:
         img_tags = soup.select('.gib_picture img, .template_area img, div.gi_gi_c img, div.jv_detail img, div.recru-details img, iframe')
@@ -574,8 +687,11 @@ def deep_scrape_detail(url):
         "welfare_tags": list(set(welfare_tags))[:5],
         "scraped_image_url": scraped_image_url,
         "official_detail_url": official_detail_url,
-        "description_source_urls": [chunk["url"] for chunk in jobkorea_chunk_sources],
-        "detail_extraction_method": "jobkorea_description_chunk" if jobkorea_chunk_sources else ("playwright_render" if rendered_html else "html")
+        "description_source_urls": [source["url"] for source in detail_sources if source.get("url")],
+        "detail_extraction_method": next(
+            (source.get("method") for source in detail_sources if source.get("method")),
+            "playwright_render" if rendered_html else "html",
+        )
     }
 
 def crawl_jobkorea():
@@ -671,16 +787,21 @@ def crawl_incruit():
         return []
 
     soup = BeautifulSoup(html, 'html.parser')
-    items = soup.select('div.n_job_list_default li, div.div_list_default tr, tr.dvResumeTr')
+    items = soup.select('ul.c_row li')
+    if not items:
+        items = soup.select('div.cell_mid, div.n_job_list_default li, div.div_list_default tr, tr.dvResumeTr')
     results = []
-    for item in items[:5]:
+    seen_detail_urls = set()
+    for item in items:
+        if len(results) >= 5:
+            break
         try:
-            corp_el = item.select_one('span.check_corp a, a.corp, a.corp_name')
+            corp_el = item.select_one('a[href*="incruit.com/company"], span.check_corp a, a.corp, a.corp_name')
             if not corp_el:
                 corp_el = item.select_one('a[href*="corp"]')
             company = corp_el.get_text(strip=True) if corp_el else "알수없음"
 
-            title_el = item.select_one('span.check_subject a, a.title, a.jobLink')
+            title_el = item.select_one('a[href*="jobdb_info/jobpost.asp"], span.check_subject a, a.title, a.jobLink')
             if not title_el:
                 continue
             href = title_el.get('href', '')
@@ -689,9 +810,14 @@ def crawl_incruit():
             title = clean_listing_title(title_el.get_text(strip=True))
             if not href.startswith('http'):
                 href = "https://job.incruit.com" + href
+            if href in seen_detail_urls:
+                continue
+            seen_detail_urls.add(href)
 
-            deadline_el = item.select_one('span.date, span.dday')
-            deadline = parse_clean_deadline(deadline_el.get_text(strip=True) if deadline_el else UNKNOWN_DEADLINE)
+            deadline_el = item.select_one('span.date, span.dday, .cell_last, .cl_btm')
+            deadline_text = deadline_el.get_text(" ", strip=True) if deadline_el else item.get_text(" ", strip=True)
+            deadline_match = re.search(r'(~\s*\d{1,2}[./-]\d{1,2}(?:\s*\([^)]+\))?|D[-_]?(?:day|\d+)|상시|채용시|오늘마감|내일마감)', deadline_text, re.IGNORECASE)
+            deadline = parse_clean_deadline(deadline_match.group(1) if deadline_match else UNKNOWN_DEADLINE)
 
             print(f"Deep scraping Incruit detail: {href}")
             detail_info = deep_scrape_detail(href)
