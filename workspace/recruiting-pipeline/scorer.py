@@ -72,7 +72,7 @@ def calculate_fit_score(item, profile):
     # Skills matching
     matched_skills = 0
     for skill in profile.get("skills", []):
-        if skill.lower() in combined_text:
+        if keyword_in_text(skill, combined_text):
             matched_skills += 1
             score += 8
             
@@ -120,6 +120,17 @@ def normalize_company_insight(item):
 def clean_text(value):
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     return text
+
+
+def keyword_in_text(keyword, text):
+    keyword = str(keyword or "").strip()
+    text = str(text or "")
+    if not keyword:
+        return False
+    if re.fullmatch(r"[A-Za-z0-9+#.\s-]+", keyword):
+        pattern = r"(?<![A-Za-z0-9])" + re.escape(keyword.lower()) + r"(?![A-Za-z0-9])"
+        return bool(re.search(pattern, text.lower()))
+    return keyword.lower() in text.lower()
 
 
 def clean_job_title(value):
@@ -206,25 +217,132 @@ def summarize_by_keywords(text, keywords, limit=120):
     return trim_summary(" / ".join(selected), limit)
 
 
+def split_summary_units(text):
+    text = clean_text(text)
+    if not text:
+        return []
+    text = re.sub(r"\s+(?=\d+\))", "\n", text)
+    text = re.sub(r"\s+(?=-\s)", "\n", text)
+    text = re.sub(r"\s+(?=(?:우대사항|자격요건|지원자격|주요업무|담당업무)\s*[:：])", "\n", text)
+    raw_units = re.split(r"[\n;]|(?<=[.!?。])\s+", text)
+    units = []
+    for unit in raw_units:
+        unit = clean_text(unit.strip(" -·ㆍ•"))
+        unit = re.sub(r"^\d+\)\s*", "", unit)
+        unit = re.sub(r"^(?:우대사항|자격요건|지원자격|주요업무|담당업무)\s*[:：]\s*", "", unit)
+        if 4 <= len(unit) <= 180:
+            units.append(unit)
+    return units
+
+
+def pick_units(text, keywords, limit=3):
+    units = split_summary_units(text)
+    selected = []
+    for unit in units:
+        lowered = unit.lower()
+        if any(keyword.lower() in lowered for keyword in keywords):
+            selected.append(unit)
+        if len(selected) >= limit:
+            break
+    if not selected:
+        selected = units[:limit]
+    return selected
+
+
+def normalized_dedupe(values):
+    result = []
+    seen = set()
+    for value in values:
+        value = clean_text(value).strip(" ,/")
+        if not value:
+            continue
+        key = re.sub(r"[\s,./:：-]+", "", value).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(value)
+    return result
+
+
+def summarize_long_field(text, field, title="", limit=None):
+    text = clean_text(text)
+    if not text:
+        return ""
+
+    limits = {
+        "requirements": 100,
+        "preferences": 120,
+        "jd_summary": 150,
+    }
+    limit = limit or limits.get(field, 120)
+
+    if field == "requirements":
+        facts = []
+        for match in re.findall(r"(?:초대졸|전문학사|학사|석사|박사)\s*이상", text, flags=re.IGNORECASE):
+            facts.append(match)
+        if re.search(r"신입\s*[·/]\s*경력", text):
+            facts.append("신입·경력")
+        elif re.search(r"경력\s*[:：]?\s*무관|경력[^,\n]{0,12}무관", text):
+            facts.append("경력 무관")
+        elif "신입" in text:
+            facts.append("신입")
+        for match in re.findall(r"\d+\s*년\s*이상", text):
+            facts.append(match)
+        for match in re.findall(r"(?:전공|학과)\s*[:：]?\s*[^/,\n]{2,35}", text):
+            facts.append(match)
+        for match in re.findall(r"(?:Python|SQL|AI|ML|LLM|Java|React|Spring|MLOps|클라우드|데이터)[^/,\n]{0,20}", text, flags=re.IGNORECASE):
+            facts.append(match)
+        units = [] if len(normalized_dedupe(facts)) >= 2 else pick_units(text, ["학사", "석사", "경력", "무관", "전공", "필수", "Python", "SQL", "AI", "데이터"], 2)
+        summary = ", ".join(normalized_dedupe(facts + units)[:4])
+        return trim_summary(summary or f"{title} 관련 핵심 자격요건 확인 필요", limit)
+
+    if field == "preferences":
+        units = pick_units(text, ["우대", "경험", "경력자", "프로젝트", "자격증", "분석", "개선", "협업", "영어"], 3)
+        cleaned_units = []
+        for unit in units:
+            unit = re.sub(r"^(?:우대사항|우대조건|우대요건)\s*[:：]?\s*", "", unit)
+            unit = clean_text(unit).strip(" ,/")
+            cleaned_units.append(unit)
+        summary = ", ".join(normalized_dedupe(cleaned_units)[:3])
+        return trim_summary(summary or f"{title} 관련 핵심 우대요건 확인 필요", limit)
+
+    if field == "jd_summary":
+        text = re.sub(r"홈페이지\s*입사\s*지원하기", " ", text)
+        role_match = re.search(r"(\((?:연구직|영업직|사무직)\)[^。.!?]{10,220})", text)
+        if role_match:
+            role_text = role_match.group(1)
+            if "부문 " in role_text:
+                role_text = role_text.split("부문 ", 1)[0] + "부문"
+            return trim_summary(role_text, limit)
+    units = pick_units(text, ["담당", "개발", "운영", "분석", "기획", "관리", "구축", "개선", "지원", "연구", "생산"], 4)
+    if field == "jd_summary":
+        units = [
+            unit for unit in units
+            if not any(skip in unit for skip in ["경영이념", "행복을 추구", "가치 창출", "성장해 나갈", "계열사로서"])
+        ] or units[:2]
+    summary = " / ".join(normalized_dedupe(units)[:2])
+    return trim_summary(summary or text, limit)
+
+
 def extract_requirements_summary(jd_text, title=""):
     if is_poor_text(jd_text):
         return trim_summary(f"{title} 관련 상세 자격요건은 원본 공고 확인 필요", 100)
     section = extract_heading_section(jd_text, ["자격요건", "지원자격", "필수요건", "필수사항", "응시자격", "requirements", "qualifications"])
-    return summarize_by_keywords(section or jd_text, ["경력", "학력", "전공", "필수", "자격", "가능", "Python", "SQL", "AI", "데이터"], 120)
+    return summarize_long_field(section or jd_text, "requirements", title)
 
 
 def extract_preferences_summary(jd_text, title=""):
     if is_poor_text(jd_text):
         return trim_summary(f"{title} 관련 우대요건은 원본 공고 확인 필요", 100)
     section = extract_heading_section(jd_text, ["우대사항", "우대조건", "우대요건", "preferred", "plus"])
-    return summarize_by_keywords(section or jd_text, ["우대", "경험", "역량", "자격증", "프로젝트", "협업", "커뮤니케이션", "영어", "리더"], 120)
+    return summarize_long_field(section or jd_text, "preferences", title)
 
 
 def summarize_jd_text(jd_text, title=""):
     if is_poor_text(jd_text):
         return ""
     section = extract_heading_section(jd_text, ["주요업무", "담당업무", "업무내용", "직무내용", "수행업무", "역할"])
-    summary = summarize_by_keywords(section or jd_text, ["담당", "개발", "운영", "분석", "기획", "관리", "구축", "개선", "지원"], 150)
+    summary = summarize_long_field(section or jd_text, "jd_summary", title)
     if not summary and title:
         return trim_summary(f"{title} 포지션의 주요 업무 수행", 120)
     return summary
@@ -234,10 +352,13 @@ def extract_structured_summaries(item, fallback_jd_summary=""):
     deep_data = item.get("deep_scraped", {}) if isinstance(item.get("deep_scraped", {}), dict) else {}
     title = clean_job_title(item.get("title", ""))
     raw_jd = sanitize_jd_text(deep_data.get("jd_summary", ""))
-    jd_summary = summarize_jd_text(raw_jd, title) or clean_text(fallback_jd_summary)
+    crawled_responsibilities = clean_text(deep_data.get("responsibilities", ""))
+    crawled_requirements = clean_text(deep_data.get("requirements", ""))
+    crawled_preferences = clean_text(deep_data.get("preferences", ""))
+    jd_summary = summarize_long_field(crawled_responsibilities, "jd_summary", title) or summarize_jd_text(raw_jd, title) or clean_text(fallback_jd_summary)
     return {
-        "requirements": extract_requirements_summary(raw_jd, title),
-        "preferences": extract_preferences_summary(raw_jd, title),
+        "requirements": summarize_long_field(crawled_requirements, "requirements", title) or extract_requirements_summary(raw_jd, title),
+        "preferences": summarize_long_field(crawled_preferences, "preferences", title) or extract_preferences_summary(raw_jd, title),
         "jd_summary": jd_summary,
     }
 
@@ -264,11 +385,11 @@ def derive_job_keywords(item, profile, fallback_jd_summary):
     keywords = []
 
     for skill in profile.get("skills", []):
-        if skill and skill.lower() in lowered:
+        if keyword_in_text(skill, lowered):
             keywords.append(hashtag(skill))
 
     for skill in JOB_SKILL_KEYWORDS:
-        if skill.lower() in lowered:
+        if keyword_in_text(skill, lowered):
             keywords.append(hashtag(skill))
 
     for needle, tag in TALENT_KEYWORDS:
@@ -397,6 +518,8 @@ def normalize_refined_data(item, profile, candidate, fallback_jd_summary):
         payload["requirements"] = structured["requirements"]
     if clean_text(payload.get("preferences")) in GENERIC_PREFERENCES or not should_accept_candidate_field("preferences", payload.get("preferences")):
         payload["preferences"] = structured["preferences"]
+    payload["requirements"] = summarize_long_field(payload.get("requirements", ""), "requirements", item.get("title", ""))
+    payload["preferences"] = summarize_long_field(payload.get("preferences", ""), "preferences", item.get("title", ""))
 
     jd_val = str(payload.get("jd_summary", "")).strip()
     image_url = sanitize_image_url(item.get("image_url", ""))
@@ -406,6 +529,8 @@ def normalize_refined_data(item, profile, candidate, fallback_jd_summary):
         payload["jd_summary"] = f"<{image_url}|🖼️ 채용 공고 원본 이미지 확인하기 (클릭 시 이동)>"
     elif not jd_val or is_poor_text(jd_val):
         payload["jd_summary"] = "공고 상세 직무 내용 확인 필요"
+    else:
+        payload["jd_summary"] = summarize_long_field(payload["jd_summary"], "jd_summary", item.get("title", ""))
 
     sal_val = str(payload.get("salary", "")).strip()
     if not sal_val or any(token in sal_val for token in ["협의", "미정", "회사내규", "추후협의"]):
