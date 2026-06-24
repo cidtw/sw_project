@@ -1,140 +1,255 @@
-# 📁 채용 파이프라인 프로젝트 구조 및 동작 다이어그램
+# 채용 파이프라인 아키텍처
 
-이 문서는 채용 파이프라인(Recruiting Pipeline) 프로젝트의 디렉터리 레이아웃과 구체적인 작업 데이터 흐름을 설명합니다.
+이 문서는 `workspace/recruiting-pipeline` 기준으로 현재 소스 코드와 실행 데이터 흐름을 정리합니다. 파이프라인의 목표는 채용 공고 수집, 기업 정보 보강, 사용자 프로필 기반 스코어링, 검증, Activepieces Slack push 전송을 체크포인트 방식으로 반복 수행하는 것입니다.
 
 ---
 
-## 1. 디렉터리 트리 (Directory Tree)
+## 1. 현재 디렉터리 구조
 
-`C:\Users\MyDream\Desktop\git\project`에 위치한 프로젝트의 전체 파일 구조는 다음과 같습니다.
-
-```
+```text
 project/
-├── .claude/                             # 에이전틱 하네스(Agentic Harness) 설정
-│   ├── agents/                          # AI 서브에이전트 정의 파일 (.md)
-│   │   ├── recruiting-pipeline-agent.md # 메인 루프 에이전트 상세 스펙
-│   │   ├── verifier-agent.md            # 자체 QA 및 데이터 검증 규칙
-│   │   ├── caveman-agent.md             # 간결하고 직관적인 소통 담당 에이전트
-│   │   └── ... (crawling-expert, backend-dev, frontend-dev, web-designer 등)
-│   └── skills/                          # 오케스트레이션 스킬 정의
-│       ├── recruiting-pipeline-orchestrator/
-│       │   └── SKILL.md                 # 오케스트레이터 상태 머신 및 규칙
-│       └── caveman-orchestrator/
-│           └── SKILL.md                 # 케이브맨 오케스트레이션 설정
-├── workspace/
-│   └── recruiting-pipeline/             # 핵심 실행 스크립트 디렉터리
-│       ├── pipeline.py                  # 코어 루프 컨트롤러 (서브프로세스 실행, 체크포인트 저장)
-│       ├── crawler.py                   # FETCH 단계 (채용 사이트 스크래핑)
-│       ├── enricher.py                  # ENRICH 단계 (DART 공시 및 국민연금 데이터 결합)
-│       ├── scorer.py                    # SCORE 단계 (코사인 유사도 기반 매칭 점수 계산)
-│       ├── remind_pipeline.py           # 리마인더 발송 스크립트
-│       └── data/
-│           └── pipeline_state.json      # 체크포인트 상태 파일 (current_phase, last_processed_id 기록)
-├── data/                                # 영구 보존 데이터 및 마스터 데이터베이스
-│   ├── recruitment.db                   # SQLite 마스터 DB (채용 공고 저장, UNIQUE 제약조건 및 sent_status 관리)
-│   ├── user_profile.json                # 사용자 환경 설정 (희망 기술 스택, 타깃 지역 등)
-│   ├── fetch_output.json                # 임시 스크래핑 결과물 (DB 중복 검사용)
-│   └── final_recruit_dashboard.json     # Slack으로 전송될 최종 포맷팅된 JSON 데이터
-├── _workspace/                          # 파이프라인 단계별 임시(Transient) 출력 디렉터리
-│   ├── fetch_output.json                # 중복 제거된 RAW 상태의 채용 공고 데이터
-│   ├── enrich_output.json               # DART 기업 정보 및 연금 통계가 추가된 데이터
-│   ├── score_output.json                # AI 매칭 점수(유사도)가 부여된 데이터
-│   └── verify_output.json               # 최종 검증이 완료된 채용 공고 데이터
-├── README.md                            # 전체 시스템 명세 및 적합성 기준 정보
-└── Agents.md                            # 루프 에이전트 상세 스펙 및 영구 메모리 규칙
-
+├── Agents.md
+├── Architecture.md
+├── README.md
+├── requirements.txt
+├── pipeline_flow.png
+├── .claude/
+│   ├── agents/
+│   │   ├── recruiting-pipeline-agent.md
+│   │   ├── verifier-agent.md
+│   │   ├── crawling-expert.md
+│   │   ├── backend-dev.md
+│   │   ├── frontend-dev.md
+│   │   └── ...
+│   └── skills/
+│       ├── recruiting-pipeline-orchestrator/SKILL.md
+│       ├── crawling-orchestrator/SKILL.md
+│       ├── jobkorea-dev-orchestrator/SKILL.md
+│       └── ...
+└── workspace/
+    └── recruiting-pipeline/
+        ├── common.py
+        ├── pipeline.py
+        ├── crawler.py
+        ├── enricher.py
+        ├── scorer.py
+        ├── verifier.py
+        ├── remind_pipeline.py
+        ├── data/
+        │   ├── pipeline_state.json
+        │   ├── recruitment.db
+        │   ├── user_profile.json
+        │   └── final_recruit_dashboard.json
+        └── _workspace/
+            ├── fetch_output.json
+            ├── enrich_output.json
+            ├── score_output.json
+            └── verify_output.json
 ```
+
+`common.py`가 경로 상수를 한 곳에서 정의합니다. 영구 상태와 DB는 `workspace/recruiting-pipeline/data/`에 있고, 단계별 중간 산출물은 `workspace/recruiting-pipeline/_workspace/`에 저장됩니다.
 
 ---
 
-## 2. 데이터 흐름 및 체크포인트 시퀀스
-
-아래 다이어그램은 `workspace/recruiting-pipeline/` 내부의 스크립트들이 `_workspace/` 디렉터리를 거쳐 데이터를 가공하고, `data/` 내부의 영구 DB와 연동 및 제어되는 전체 흐름을 나타냅니다.
+## 2. 실행 흐름
 
 ```mermaid
-graph TD
-    %% 디렉터리 경계 영역 정의
-    subgraph ScriptWorkspace ["workspace/recruiting-pipeline/"]
-        PL["pipeline.py (메인 루프 드라이버)"]
-        CW["crawler.py (1단계: FETCH)"]
-        ER["enricher.py (2단계: ENRICH)"]
-        SC["scorer.py (3단계: SCORE)"]
-        StateJSON["data/pipeline_state.json <br> (체크포인트 및 진행 단계 기록)"]
-    end
+flowchart TD
+    Start["pipeline.py 시작"] --> State["pipeline_state.json 로드"]
+    State --> ProfileHash["user_profile.json hash 확인"]
+    ProfileHash --> Fetch{"current_phase <= FETCH?"}
 
-    subgraph PhaseOutputs ["_workspace/ (임시 출력 디렉터리)"]
-        FOut["fetch_output.json"]
-        EOut["enrich_output.json"]
-        SOut["score_output.json"]
-        VOut["verify_output.json"]
-    end
+    Fetch -->|예| Crawler["crawler.py"]
+    Crawler --> JobSites["JobKorea / Saramin / Incruit"]
+    JobSites --> FetchOut["_workspace/fetch_output.json"]
+    Crawler --> DB[("data/recruitment.db")]
 
-    subgraph MasterData ["data/ (영구 상태 및 마스터 데이터)"]
-        DB[("recruitment.db <br> (SQLite 마스터 DB)")]
-        Profile["user_profile.json <br> (타깃 기술/지역 설정)"]
-        FinalJSON["final_recruit_dashboard.json"]
-    end
+    Fetch -->|아니오| Enrich
+    FetchOut --> Dedupe["sent_job_ids + DB 기반 중복 필터"]
+    Dedupe --> Enrich["enricher.py"]
+    Enrich --> EnrichOut["_workspace/enrich_output.json"]
 
-    subgraph AgentHarness [".claude/ (에이전트 정의)"]
-        VerifAgent["agents/verifier-agent.md <br> (포맷 및 정합성 검증 규칙)"]
-    end
+    EnrichOut --> Score["scorer.py"]
+    Profile["data/user_profile.json"] --> Score
+    Score --> ScoreOut["_workspace/score_output.json"]
 
-    %% 프로세스 실행 및 데이터 흐름
-    PL -->|1. 상태 확인 및 업데이트| StateJSON
-    PL -->|2. 서브프로세스 실행| CW
-    CW -->|3. 원본 데이터 저장| FOut
-    
-    %% 중복 제거 단계
-    FOut -->|4. 중복 필터링| PL
-    DB <-->|회사명/공고명 고유성 및 전송 여부 확인| PL
-    
-    %% 기업 정보 보강 단계 (Enrichment)
-    PL -->|5. 서브프로세스 실행| ER
-    EOut -.->|원본 데이터 로드| ER
-    ER -->|6. DART/국민연금 통계 결합| EOut
-    
-    %% AI 매칭 점수 산정 단계 (Scoring)
-    PL -->|7. 서브프로세스 실행| SC
-    EOut -.->|보강된 데이터 로드| SC
-    Profile -.->|사용자 선호도 분석| SC
-    SC -->|8. AI 코사인 유사도 분석 및 점수 부여| SOut
-    
-    %% 검증 루프 (회복탄력성 및 자가 수정 메커니즘)
-    PL -->|9. 자체 QA 체크 요청| VerifAgent
-    SOut -.->|포맷 오류 및 마감년도 불일치 검사| VerifAgent
-    VerifAgent -->|실패: Scorer.py 재실행 (최대 3회)| SC
-    VerifAgent -->|성공: 검증 완료 데이터 저장| VOut
-    
-    %% 데이터 전송 단계 (Dispatch)
-    VOut -->|10. 최종 페이로드 복사| FinalJSON
-    PL -->|11. 웹훅 발송| Activepieces["Activepieces / Slack"]
-    Activepieces -->|전송 성공 시 sent_status = 1 변경| DB
-    Activepieces -->|최종 체크포인트 갱신| StateJSON
-    
-    %% 스타일 정의
-    style PL fill:#1a73e8,stroke:#1557b0,color:#fff,stroke-width:2px
-    style StateJSON fill:#fef7e0,stroke:#f8c441,color:#000
-    style DB fill:#e8f0fe,stroke:#1a73e8,color:#000
-    style Profile fill:#e8f0fe,stroke:#1a73e8,color:#000
-    style VerifAgent fill:#fce8e6,stroke:#d93025,color:#000
-    style Activepieces fill:#e6f4ea,stroke:#137333,color:#000
+    ScoreOut --> Verify["verifier.py"]
+    FetchOut --> Verify
+    Verify -->|성공| VerifyOut["_workspace/verify_output.json"]
+    Verify -->|실패, 최대 3회| Score
 
+    VerifyOut --> Final["data/final_recruit_dashboard.json"]
+    Final --> Dispatch["pipeline.py dispatch_to_activepieces"]
+    Dispatch --> Activepieces["Activepieces Slack Webhook"]
+    Activepieces --> SentStatus["DB sent_status = 1"]
+    Activepieces --> Idle["current_phase = IDLE"]
+
+    Final --> Remind["remind_pipeline.py"]
+    Remind --> RemindWebhook["마감 임박 Slack Webhook"]
 ```
+
+각 단계가 시작될 때 `pipeline.py`는 `current_phase`를 `[FETCH] -> [ENRICH] -> [SCORE] -> [VERIFY] -> [DISPATCH]` 순서로 갱신합니다. 프로세스가 중간에 끊기면 다음 실행에서 해당 단계부터 재개할 수 있습니다.
 
 ---
 
-## 3. 핵심 컴포넌트 상세 분석
+## 3. 핵심 컴포넌트
 
-### A. 체크포인트를 활용한 오류 복구 (State Checkpointing)
+### common.py
 
-* **`data/pipeline_state.json`**: 시스템의 진행 상황을 실시간으로 기억하는 메모리 역할을 합니다. 예를 들어, 매칭 점수 산정(`SCORE`) 단계에서 예기치 못한 에러로 파이프라인이 중단되더라도, `pipeline.py`가 재시작될 때 `current_phase: "SCORE"`를 읽어와 수집(`FETCH`) 및 정보 보강(`ENRICH`) 단계를 건너뛰고 오류가 발생한 지점부터 즉시 작업을 재개합니다.
-* **자가 수정 메커니즘 (QA Retry)**: `verifier-agent.md`에 정의된 검증 규칙(필수 키 누락 여부, 원본 데이터와 AI 가공 데이터 간의 마감년도 일치 여부 등)을 통과하지 못하면, `pipeline.py`는 자동으로 `scorer.py`를 재호출합니다. 연속 3회 실패할 경우에만 프로세스를 멈추고 에러 로그를 기록합니다.
+- `BASE_DIR`, `DATA_DIR`, `WORKSPACE_DIR` 및 주요 JSON/DB 경로를 정의합니다.
+- `read_json`, `write_json`, `post_json`으로 파일 I/O와 webhook POST를 표준화합니다.
+- `normalized_job_key()`로 회사명과 공고명을 정규화해 중복 판정에 사용합니다.
+- `init_openai_client()`는 `OPENAI_API_KEY`가 없거나 SDK 초기화가 실패하면 `None`을 반환해 로컬 fallback 경로가 동작하게 합니다.
 
-### B. 철저한 중복 지원 예방
+### pipeline.py
 
-* **SQLite 데이터베이스 (`recruitment.db`)**: 이미 수집했거나 확인한 공고가 다시 처리되는 것을 원천 차단합니다. `UNIQUE(company, title)` 복합 인덱스 제약조건을 통해 데이터베이스 수준에서 중복 유입을 물리적으로 방지합니다.
-* **`sent_status` 확인**: 스케줄러는 아직 Slack으로 전송되지 않은 공고(`sent_status = 0`)만 선별하여 정보 보강 및 AI 매칭 단계를 거치도록 제어합니다. 메신저로 전송이 성공적으로 완료되면 해당 값은 즉시 `1`로 업데이트됩니다.
+- 전체 루프의 상태 머신입니다.
+- `pipeline_state.json`을 읽고 `current_phase`, `last_processed_id`, `sent_job_ids`, `user_profile_hash`를 관리합니다.
+- `crawler.py`, `enricher.py`, `scorer.py`, `verifier.py`, `remind_pipeline.py`를 서브프로세스로 실행합니다.
+- 검증 성공 후 `verify_output.json`을 `final_recruit_dashboard.json`으로 복사하고 Activepieces webhook으로 Slack push를 보냅니다.
+- 전송 성공 시 `sent_job_ids`와 `last_processed_id`를 갱신하고, `detail_url` 기준으로 SQLite `sent_status = 1`을 업데이트합니다.
+- `preprocess_multi_source_payload()`는 Slack 템플릿이 쓰기 쉽도록 `job_keywords_string`을 만들고, JD 텍스트가 실제로 부족할 때만 원본 이미지 링크 fallback을 사용합니다.
 
-### C. 보안 이미지 우회 및 렌더링 (Imgur Bypass)
+### crawler.py
 
-* 포스코(POSCO) 사내 인트라넷 등 엄격한 보안 정책이 적용된 사이트의 이미지 주소는 Slack에서 직접 정상적으로 렌더링되지 않는 문제가 발생합니다. 이를 해결하기 위해 파이프라인 내부에서 보안 이미지를 로컬로 자동 다운로드한 후 익명 Imgur 저장소에 업로드합니다. 이후 변환된 고유 URL을 `final_recruit_dashboard.json`에 업데이트하여 Slack 웹훅 발송 시 이미지가 끊김 없이 깔끔하게 보이도록 보장합니다.
+`FETCH` 단계의 수집기입니다. 결과는 DB에 저장되고, 아직 전송되지 않은 공고만 `_workspace/fetch_output.json`으로 출력됩니다.
+
+- 공통 기능
+  - 잡코리아, 사람인, 인크루트를 수집합니다.
+  - `parse_clean_deadline()`으로 `D-5`, `2026.07.01`, `오늘`, `내일`, `상시채용`, `채용시 마감` 등을 표준화합니다.
+  - 제목에 섞인 `D-숫자스크랩` 조각을 제거합니다.
+  - 기본 placeholder 이미지는 사용하지 않고, 실제 공고에서 찾은 원본 이미지만 `image_url`로 전달합니다.
+
+- 잡코리아 상세 수집
+  - 기존 HTML selector 기반 파싱을 먼저 수행합니다.
+  - Next/React Flight 응답 안의 `job-hub-files..._DESCRIPTION.html`, `job-hub-files..._OCR.html` presigned URL을 추출합니다.
+  - 해당 DESCRIPTION/OCR HTML을 직접 요청해 이미지형 공고와 JavaScript 청크형 공고의 텍스트를 확보합니다.
+  - 추출 결과는 `jd_summary`, `responsibilities`, `requirements`, `preferences`, `scraped_image_url`, `description_source_urls`, `detail_extraction_method`로 저장합니다.
+  - HTML과 청크 수집이 부실할 때만 로컬에 Playwright가 설치된 경우 렌더링 fallback을 시도합니다.
+
+### enricher.py
+
+`ENRICH` 단계의 기업 컨텍스트 보강기입니다.
+
+- `LOCAL_DART_DB`, `LOCAL_PENSION_DB`에 있는 기업은 로컬 매핑을 우선 사용합니다.
+- OpenAI client가 있으면 기업 규모, 주요 사업, 중장기 계획, 안정성 점수를 JSON 형태로 보강합니다.
+- 상세 JD가 부실하고 실제 이미지 URL이 있는 경우 GPT-4o Vision OCR 경로를 사용할 수 있습니다.
+- 출력은 `_workspace/enrich_output.json`입니다.
+
+### scorer.py
+
+`SCORE` 단계의 정형화 및 스코어링 엔진입니다.
+
+- 사용자 프로필(`user_profile.json`)과 공고 제목/JD를 비교해 `fit_score`를 계산합니다.
+- OpenAI client가 있으면 `response_format={"type": "json_object"}`로 정형 JSON을 요청합니다.
+- OpenAI client가 없거나 응답이 부실하면 로컬 규칙 기반 fallback이 동작합니다.
+- 크롤러가 전달한 `requirements`, `preferences`, `responsibilities`를 우선 사용하되, Slack에 긴 OCR 원문이 나가지 않도록 최종 단계에서 한 줄 핵심 요약으로 압축합니다.
+- `#직무역량 #자소서작성 #성장가능성` 같은 고정 placeholder 키워드를 제거하고, JD/기업 insight/직무 기술 기반으로 `job_keywords`를 생성합니다.
+- placeholder 이미지, 오래된 fallback 문구, 과도하게 긴 후보값을 정리합니다.
+- 출력은 `_workspace/score_output.json`입니다.
+
+### verifier.py
+
+`VERIFY` 단계의 독립 검증기입니다.
+
+- 필수 payload key가 모두 존재하는지 확인합니다.
+- `fit_score`, `analysis`, `company_insight`, `job_keywords` 형식을 검사합니다.
+- 원본 `fetch_output.json`과 최종 `score_output.json`의 마감년도 불일치를 감지합니다.
+- 금지된 fallback 문구, 고정 키워드, placeholder 이미지 URL이 최종 payload에 남아 있으면 실패 처리합니다.
+- 성공 시 `_workspace/verify_output.json`을 씁니다.
+
+### remind_pipeline.py
+
+마감 임박 리마인더입니다.
+
+- `final_recruit_dashboard.json`에서 마감일을 읽습니다.
+- D-day가 0-3일인 공고만 별도 Activepieces webhook으로 보냅니다.
+
+---
+
+## 4. 데이터 계약
+
+최종 Slack payload는 아래 필드를 기본 계약으로 사용합니다.
+
+```json
+{
+  "company": "string",
+  "title": "string",
+  "employment_type": "string",
+  "location": "string",
+  "salary": "string",
+  "requirements": "string",
+  "preferences": "string",
+  "jd_summary": "string",
+  "job_keywords": ["string"],
+  "job_keywords_string": "string",
+  "detail_url": "string",
+  "company_career_url": "string",
+  "deadline": "string",
+  "image_url": "string",
+  "fit_score": 0,
+  "analysis": {
+    "job_category": "string",
+    "location_score": "string",
+    "jd_summary": "string",
+    "welfare": "string"
+  },
+  "company_insight": {
+    "company_size": "string",
+    "primary_industry": "string",
+    "mid_long_term_plan": "string",
+    "stability": "string",
+    "stability_score": "string"
+  }
+}
+```
+
+중요한 출력 규칙은 다음과 같습니다.
+
+- `requirements`, `preferences`, `jd_summary`는 원문 전체가 아니라 핵심 요약 한 줄이어야 합니다.
+- JD 텍스트를 확보하지 못한 경우에만 `image_url` 기반 Slack 링크를 사용합니다.
+- `job_keywords`는 기업 방향성, 인재상, 직무 기술, 사용자 프로필을 조합해 생성합니다.
+- Slack 템플릿 편의를 위해 `job_keywords_string`도 함께 전달합니다.
+
+---
+
+## 5. 중복 방지와 재시작 전략
+
+- DB 레벨에서는 `normalized_key`와 `UNIQUE(company, title)`로 같은 공고의 중복 저장을 막습니다.
+- 루프 레벨에서는 `pipeline_state.json.sent_job_ids`와 `last_processed_id`로 이미 Slack에 전송된 공고를 필터링합니다.
+- Activepieces 전송 성공 후에만 DB `sent_status`가 `1`로 변경됩니다.
+- 각 phase 진입 시 `current_phase`가 즉시 저장되므로 서버 재시작 이후에도 마지막 진행 단계부터 이어갈 수 있습니다.
+
+---
+
+## 6. 외부 연동
+
+- 잡코리아/사람인/인크루트: 채용 공고 목록과 상세 공고 수집 대상입니다.
+- JobKorea `job-hub-files` S3 DESCRIPTION/OCR HTML: 이미지형/JS 청크형 잡코리아 상세 공고의 핵심 텍스트 수집 경로입니다.
+- OpenAI API: 기업 정보 보강, 이미지 OCR fallback, 공고 정형화에 선택적으로 사용됩니다.
+- Activepieces: 최종 Slack dashboard push와 마감 임박 리마인더 push를 담당합니다.
+- SQLite: 수집 공고, 상세 크롤링 JSON, 전송 상태를 저장합니다.
+
+---
+
+## 7. 운영 검증 명령
+
+```powershell
+cd C:\Users\MyDream\Desktop\git\project\workspace\recruiting-pipeline
+python -m py_compile common.py crawler.py enricher.py scorer.py pipeline.py verifier.py remind_pipeline.py
+python -X utf8 verifier.py
+```
+
+잡코리아 OCR/청크 수집 단건 확인 예시는 다음과 같습니다.
+
+```powershell
+$env:PYTHONIOENCODING='utf-8'
+@'
+from crawler import deep_scrape_detail
+info = deep_scrape_detail("https://www.jobkorea.co.kr/Recruit/GI_Read/49422447")
+print(info["detail_extraction_method"])
+print(info["requirements"][:120])
+print(info["preferences"][:120])
+print(info["jd_summary"][:200])
+'@ | python -X utf8 -
+```
