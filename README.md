@@ -50,6 +50,19 @@ Codex는 기존 Antigravity/Claude 에이전트들이 구성한 파이프라인 
 - 샘플 데이터 기준 `fetch_output.json` ➔ `score_output.json` ➔ `verifier.py` 흐름이 강화된 verifier 규칙을 통과했습니다.
 - GitHub 원격 저장소 `main` 브랜치에 커밋 `0504daf`(`refactor: harden recruiting pipeline architecture`)로 반영했습니다.
 
+### ⚠️ 설계(Architecture.md/Agents.md) 대비 실제 코드상 생략 및 변경된 사항
+
+실제 구현된 코드베이스 검토 결과, 초기 설계 및 에이전트 명세 대비 아래 기능들이 생략되거나 간소화되었습니다.
+
+1. **보안 이미지 우회 및 렌더링 (Imgur Image Bypass) 생략**
+   - `Architecture.md`에 기재된 Imgur CDN 우회 로직(`bypass_image_via_imgur`)은 실제 [pipeline.py](file:///c:/Users/MyDream/Desktop/git/project/workspace/recruiting-pipeline/pipeline.py) 리팩토링 과정에서 완전히 삭제되었습니다. 현재는 부실 텍스트 감지 시 Unsplash 기본 이미지(`DEFAULT_IMAGE`) 및 텍스트 Fallback만 적용됩니다.
+2. **Activepieces 연동 기업 정보 보강 생략 (LLM/로컬 캐시 대체)**
+   - `Agents.md` 상의 DART API/국민연금 데이터 Activepieces 위임 웹훅 방식 대신, [enricher.py](file:///c:/Users/MyDream/Desktop/git/project/workspace/recruiting-pipeline/enricher.py)에서 로컬 캐시 DB(`LOCAL_DART_DB`, `LOCAL_PENSION_DB`)를 조회하고 매칭이 안 되는 기업은 OpenAI API(`gpt-4o-mini`)를 통해 동적으로 보강하도록 대체 구현되었습니다.
+3. **Scrapy & Playwright-Stealth 수집 도구 생략 (urllib/BeautifulSoup 대체)**
+   - `Agents.md`에 언급된 Scrapy, Playwright-Stealth 및 원티드/리멤버 API 역추적 스크립트 대신, [crawler.py](file:///c:/Users/MyDream/Desktop/git/project/workspace/recruiting-pipeline/crawler.py)에서 표준 `urllib.request`와 `BeautifulSoup`을 사용하는 정적 스크래핑 방식으로 구현되어 있습니다.
+4. **코사인 유사도(Cosine Similarity) 단순 가산점 매칭 대체**
+   - 설계상의 Cosine Similarity 기반 매칭 점수 연산 대신, [scorer.py](file:///c:/Users/MyDream/Desktop/git/project/workspace/recruiting-pipeline/scorer.py) 내 `calculate_fit_score` 함수는 기술 키워드 일치(+8점) 및 선호 지역 일치(+10점)를 계산하는 휴리스틱 단순 가산점 방식으로 구현되어 있습니다.
+
 ---
 
 ## ⏱️ 단계별 상세 워크플로우
