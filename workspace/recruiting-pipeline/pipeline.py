@@ -61,22 +61,23 @@ def preprocess_multi_source_payload(payload):
     if "job_keywords" in payload and isinstance(payload["job_keywords"], list):
         payload["job_keywords_string"] = "   ".join(payload["job_keywords"])
     else:
-        payload["job_keywords_string"] = "#채용 #직무역량 #취업준비"
+        payload["job_keywords_string"] = "#채용공고분석 #기업비전 #직무적합성"
 
-    # 2. 직무기술서 부실 상태 방어 및 이미지 링크 마크다운 바인딩 (출력 포맷 통일)
+    # 2. 직무기술서 부실 상태 방어. 텍스트가 없을 때에만 이미지 링크로 대체한다.
     jd_text = payload.get("jd_summary", "").strip()
     img_url = payload.get("image_url", "").strip()
+    if "images.unsplash.com/photo-1586281380349-632531db7ed4" in jd_text:
+        jd_text = ""
+        payload["jd_summary"] = ""
+    if "images.unsplash.com/photo-1586281380349-632531db7ed4" in img_url:
+        img_url = ""
+        payload["image_url"] = ""
     
-    # 만약 글자가 너무 짧거나 '참조' 문구만 있다면 긁어온 원본 이미지 마크다운으로 대치
-    if not jd_text or "참조" in jd_text or len(jd_text) < 30:
+    if not jd_text or "참조" in jd_text or len(jd_text) < 12:
         if img_url:
             payload["jd_summary"] = f"<{img_url}|🖼️ 채용 공고 원본 이미지 확인하기 (클릭 시 이동)>"
         else:
-            payload["jd_summary"] = "공고 상세 직무 내용을 참조하십시오."
-    else:
-        # 텍스트도 살아있고 이미지도 있다면 둘 다 볼 수 있게 하단에 하이퍼링크 추가
-        if img_url:
-            payload["jd_summary"] = f"{jd_text}\n\n👉 <{img_url}|🖼️ 채용 공고 원본 이미지 같이 보기>"
+            payload["jd_summary"] = "공고 상세 직무 내용 확인 필요"
 
     return payload
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import re
 import sys
 import urllib.parse
 
@@ -20,6 +21,41 @@ DEFAULT_USER_PROFILE = {
 }
 
 client = init_openai_client("scorer")
+
+TEXT_POOR_MARKERS = ("참조", "분석 생략", "분석 실패", "정보없음", "추출 불가")
+GENERIC_REQUIREMENTS = {
+    "공고 자격요건 및 전공 요건 참조",
+    "자격요건 참조",
+}
+GENERIC_PREFERENCES = {
+    "우대 스택 및 동종 업계 경력 우대",
+    "우대사항 참조",
+}
+GENERIC_KEYWORDS = {"#직무역량", "#자소서작성", "#성장가능성", "#성장지향", "#자소서팁"}
+SECTION_HEADINGS = (
+    "주요업무", "담당업무", "업무내용", "직무내용", "수행업무", "역할",
+    "자격요건", "지원자격", "필수요건", "필수사항", "응시자격",
+    "우대사항", "우대조건", "우대요건", "preferred",
+    "복리후생", "근무조건", "전형절차"
+)
+JOB_SKILL_KEYWORDS = [
+    "AI", "LLM", "머신러닝", "딥러닝", "Python", "SQL", "데이터분석", "데이터 엔지니어링",
+    "데이터 파이프라인", "MLOps", "클라우드", "AWS", "Azure", "GCP", "자동화", "백엔드",
+    "프론트엔드", "React", "Node", "Java", "Spring", "PM", "서비스기획", "마케팅",
+    "영업", "콘텐츠", "재무", "회계", "인사", "HR", "UX", "UI", "보안", "인프라"
+]
+TALENT_KEYWORDS = [
+    ("협업", "#협업"),
+    ("소통", "#소통"),
+    ("문제 해결", "#문제해결"),
+    ("문제해결", "#문제해결"),
+    ("주도", "#주도성"),
+    ("책임", "#책임감"),
+    ("성장", "#성장마인드"),
+    ("글로벌", "#글로벌"),
+    ("고객", "#고객중심"),
+    ("혁신", "#혁신"),
+]
 
 def load_user_profile():
     if USER_PROFILE_PATH.exists():
@@ -81,6 +117,202 @@ def normalize_company_insight(item):
     }
 
 
+def clean_text(value):
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return text
+
+
+def clean_job_title(value):
+    title = clean_text(value)
+    title = re.sub(r"D[-_]?\d+\s*스크랩", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"D[-_]?\d+", "", title, flags=re.IGNORECASE)
+    title = title.replace("스크랩", "")
+    return clean_text(title)
+
+
+def sanitize_image_url(value):
+    url = clean_text(value)
+    if "images.unsplash.com/photo-1586281380349-632531db7ed4" in url:
+        return ""
+    return url
+
+
+def sanitize_jd_text(value):
+    text = clean_text(value)
+    if "images.unsplash.com/photo-1586281380349-632531db7ed4" in text:
+        return ""
+    return text
+
+
+def is_poor_text(value):
+    text = clean_text(value)
+    if not text or len(text) < 12:
+        return True
+    return any(marker in text for marker in TEXT_POOR_MARKERS)
+
+
+def split_chunks(text):
+    text = clean_text(text)
+    if not text:
+        return []
+    normalized = re.sub(r"\s*[•ㆍ·]\s*", "\n", text)
+    normalized = re.sub(r"\s+(?=(?:주요업무|담당업무|자격요건|지원자격|필수요건|우대사항|우대조건|복리후생)\s*[:：])", "\n", normalized)
+    raw_chunks = re.split(r"[\n;]|(?<=[.!?。])\s+", normalized)
+    chunks = []
+    for chunk in raw_chunks:
+        chunk = clean_text(chunk.strip(" -·ㆍ•"))
+        if 8 <= len(chunk) <= 260:
+            chunks.append(chunk)
+    if not chunks and text:
+        chunks.append(text[:260])
+    return chunks
+
+
+def trim_summary(text, limit=120):
+    text = clean_text(text).strip(" -·ㆍ•")
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rstrip()
+    last_space = cut.rfind(" ")
+    if last_space > 45:
+        cut = cut[:last_space]
+    return cut.rstrip(" ,/") + "..."
+
+
+def extract_heading_section(text, headings):
+    source = clean_text(text)
+    if not source:
+        return ""
+    heading_pattern = "|".join(re.escape(h) for h in headings)
+    stop_pattern = "|".join(re.escape(h) for h in SECTION_HEADINGS if h not in headings)
+    pattern = rf"(?:{heading_pattern})\s*[:：]?\s*(.*?)(?=(?:{stop_pattern})\s*[:：]?|$)"
+    match = re.search(pattern, source, re.IGNORECASE)
+    if match:
+        return clean_text(match.group(1))
+    return ""
+
+
+def summarize_by_keywords(text, keywords, limit=120):
+    chunks = split_chunks(text)
+    selected = []
+    for chunk in chunks:
+        lowered = chunk.lower()
+        if any(keyword.lower() in lowered for keyword in keywords):
+            selected.append(chunk)
+        if len(selected) >= 2:
+            break
+    if not selected and chunks:
+        selected = chunks[:2]
+    return trim_summary(" / ".join(selected), limit)
+
+
+def extract_requirements_summary(jd_text, title=""):
+    if is_poor_text(jd_text):
+        return trim_summary(f"{title} 관련 상세 자격요건은 원본 공고 확인 필요", 100)
+    section = extract_heading_section(jd_text, ["자격요건", "지원자격", "필수요건", "필수사항", "응시자격", "requirements", "qualifications"])
+    return summarize_by_keywords(section or jd_text, ["경력", "학력", "전공", "필수", "자격", "가능", "Python", "SQL", "AI", "데이터"], 120)
+
+
+def extract_preferences_summary(jd_text, title=""):
+    if is_poor_text(jd_text):
+        return trim_summary(f"{title} 관련 우대요건은 원본 공고 확인 필요", 100)
+    section = extract_heading_section(jd_text, ["우대사항", "우대조건", "우대요건", "preferred", "plus"])
+    return summarize_by_keywords(section or jd_text, ["우대", "경험", "역량", "자격증", "프로젝트", "협업", "커뮤니케이션", "영어", "리더"], 120)
+
+
+def summarize_jd_text(jd_text, title=""):
+    if is_poor_text(jd_text):
+        return ""
+    section = extract_heading_section(jd_text, ["주요업무", "담당업무", "업무내용", "직무내용", "수행업무", "역할"])
+    summary = summarize_by_keywords(section or jd_text, ["담당", "개발", "운영", "분석", "기획", "관리", "구축", "개선", "지원"], 150)
+    if not summary and title:
+        return trim_summary(f"{title} 포지션의 주요 업무 수행", 120)
+    return summary
+
+
+def extract_structured_summaries(item, fallback_jd_summary=""):
+    deep_data = item.get("deep_scraped", {}) if isinstance(item.get("deep_scraped", {}), dict) else {}
+    title = clean_job_title(item.get("title", ""))
+    raw_jd = sanitize_jd_text(deep_data.get("jd_summary", ""))
+    jd_summary = summarize_jd_text(raw_jd, title) or clean_text(fallback_jd_summary)
+    return {
+        "requirements": extract_requirements_summary(raw_jd, title),
+        "preferences": extract_preferences_summary(raw_jd, title),
+        "jd_summary": jd_summary,
+    }
+
+
+def hashtag(value):
+    text = re.sub(r"[^0-9A-Za-z가-힣]+", "", str(value or ""))
+    return f"#{text}" if text else ""
+
+
+def derive_job_keywords(item, profile, fallback_jd_summary):
+    company_insight = normalize_company_insight(item)
+    title = clean_job_title(item.get("title", ""))
+    raw_jd = sanitize_jd_text(item.get("deep_scraped", {}).get("jd_summary", ""))
+    context = clean_text(
+        " ".join([
+            title,
+            raw_jd,
+            fallback_jd_summary,
+            company_insight.get("primary_industry", ""),
+            company_insight.get("mid_long_term_plan", ""),
+        ])
+    )
+    lowered = context.lower()
+    keywords = []
+
+    for skill in profile.get("skills", []):
+        if skill and skill.lower() in lowered:
+            keywords.append(hashtag(skill))
+
+    for skill in JOB_SKILL_KEYWORDS:
+        if skill.lower() in lowered:
+            keywords.append(hashtag(skill))
+
+    for needle, tag in TALENT_KEYWORDS:
+        if needle in context:
+            keywords.append(tag)
+
+    plan = company_insight.get("mid_long_term_plan", "")
+    if "디지털" in plan or "자동화" in plan:
+        keywords.append("#디지털전환")
+    if "AI" in plan or "인공지능" in plan:
+        keywords.append("#AI전략")
+    if "글로벌" in plan:
+        keywords.append("#글로벌확장")
+
+    for token in re.findall(r"[A-Za-z]{2,}|[가-힣]{2,}", title):
+        if token not in {"채용", "모집", "경력", "신입", "정규직", "계약직"}:
+            keywords.append(hashtag(token))
+        if len(keywords) >= 6:
+            break
+
+    if len(dedupe_preserve_order([kw for kw in keywords if kw])) < 3:
+        industry = company_insight.get("primary_industry", "")
+        for token in re.findall(r"[가-힣A-Za-z]{2,}", industry):
+            keywords.append(hashtag(token))
+            if len(keywords) >= 5:
+                break
+
+    keywords = [kw for kw in dedupe_preserve_order(keywords) if kw and kw not in GENERIC_KEYWORDS]
+    return keywords[:5] if len(keywords) >= 3 else dedupe_preserve_order(keywords + ["#채용공고분석", "#기업비전", "#직무적합성"])[:5]
+
+
+def should_accept_candidate_field(key, value):
+    text = clean_text(value)
+    if not text:
+        return False
+    if key == "requirements" and text in GENERIC_REQUIREMENTS:
+        return False
+    if key == "preferences" and text in GENERIC_PREFERENCES:
+        return False
+    if key in {"requirements", "preferences", "jd_summary"} and len(text) < 8:
+        return False
+    return True
+
+
 def build_architecture_fields(item, payload, location_matched):
     deep_data = item.get("deep_scraped", {}) if isinstance(item.get("deep_scraped", {}), dict) else {}
     extracted = item.get("extracted_info", {}) if isinstance(item.get("extracted_info", {}), dict) else {}
@@ -88,7 +320,7 @@ def build_architecture_fields(item, payload, location_matched):
         "analysis": {
             "job_category": extracted.get("job_category", "IT / 데이터 / AI"),
             "location_score": "95점 (선호 지역 일치)" if location_matched else "70점 (선호 지역 미확인)",
-            "jd_summary": payload.get("jd_summary", "공고 상세 직무 내용을 참조하십시오."),
+            "jd_summary": payload.get("jd_summary", "공고 상세 직무 내용 확인 필요"),
             "welfare": format_welfare(deep_data),
         },
         "company_insight": normalize_company_insight(item),
@@ -97,31 +329,23 @@ def build_architecture_fields(item, payload, location_matched):
 
 def build_base_job_data(item, profile, fallback_jd_summary):
     company = item.get("company", "")
-    title = item.get("title", "")
+    title = clean_job_title(item.get("title", ""))
     detail_url = item.get("detail_url", "")
-    image_url = item.get("image_url", "")
-    deadline = item.get("deadline", "~2026.07.05(일)")
+    image_url = sanitize_image_url(item.get("image_url", ""))
+    deadline = item.get("deadline", "마감일 확인 필요")
     deep_data = item.get("deep_scraped", {}) if isinstance(item.get("deep_scraped", {}), dict) else {}
     extracted = item.get("extracted_info", {}) if isinstance(item.get("extracted_info", {}), dict) else {}
-    fallback_jd_summary = fallback_jd_summary or "공고 상세 직무 내용을 참조하십시오."
-    
-    job_keywords = []
-    combined_text = (title + " " + fallback_jd_summary).lower()
-    for skill in profile.get("skills", []):
-        if skill.lower() in combined_text:
-            job_keywords.append(f"#{skill}")
-    
-    if len(job_keywords) < 3:
-        job_keywords.extend(["#직무역량", "#자소서작성", "#성장가능성"])
-    job_keywords = dedupe_preserve_order(job_keywords)[:5]
+    structured = extract_structured_summaries(item, fallback_jd_summary)
+    fallback_jd_summary = structured["jd_summary"] or fallback_jd_summary or "공고 상세 직무 내용 확인 필요"
+    job_keywords = derive_job_keywords(item, profile, fallback_jd_summary)
     
     career_url = deep_data.get("official_detail_url")
     if not career_url:
         encoded_company = urllib.parse.quote(company)
         career_url = f"https://www.google.com/search?q={encoded_company}+채용+페이지"
     
-    requirements = "공고 자격요건 및 전공 요건 참조"
-    preferences = "우대 스택 및 동종 업계 경력 우대"
+    requirements = structured["requirements"]
+    preferences = structured["preferences"]
     
     fit_score, location_matched = calculate_fit_score(item, profile)
     locs = as_list(extracted.get("location"), ["서울"])
@@ -156,23 +380,32 @@ def normalize_refined_data(item, profile, candidate, fallback_jd_summary):
 
     for key in pass_through_keys:
         value = candidate.get(key)
-        if value:
+        if should_accept_candidate_field(key, value):
             payload[key] = value
 
     kw = candidate.get("job_keywords", payload["job_keywords"])
     if not isinstance(kw, list):
         kw = payload["job_keywords"]
     kw = [keyword if str(keyword).startswith("#") else f"#{keyword}" for keyword in kw]
-    if len(kw) < 3:
-        kw.extend(["#직무역량", "#성장지향", "#자소서팁"])
+    kw = [keyword for keyword in kw if keyword not in GENERIC_KEYWORDS]
+    if len(dedupe_preserve_order(kw)) < 3:
+        kw = derive_job_keywords(item, profile, fallback_jd_summary)
     payload["job_keywords"] = dedupe_preserve_order(kw)[:5]
 
+    structured = extract_structured_summaries(item, fallback_jd_summary)
+    if clean_text(payload.get("requirements")) in GENERIC_REQUIREMENTS or not should_accept_candidate_field("requirements", payload.get("requirements")):
+        payload["requirements"] = structured["requirements"]
+    if clean_text(payload.get("preferences")) in GENERIC_PREFERENCES or not should_accept_candidate_field("preferences", payload.get("preferences")):
+        payload["preferences"] = structured["preferences"]
+
     jd_val = str(payload.get("jd_summary", "")).strip()
-    image_url = item.get("image_url", "")
-    if (not jd_val or "참조" in jd_val or len(jd_val) < 20) and image_url:
+    image_url = sanitize_image_url(item.get("image_url", ""))
+    if is_poor_text(jd_val) and structured["jd_summary"] and not is_poor_text(structured["jd_summary"]):
+        payload["jd_summary"] = structured["jd_summary"]
+    elif (not jd_val or "참조" in jd_val or len(jd_val) < 12) and image_url:
         payload["jd_summary"] = f"<{image_url}|🖼️ 채용 공고 원본 이미지 확인하기 (클릭 시 이동)>"
-    elif not jd_val:
-        payload["jd_summary"] = "공고 상세 직무 내용을 참조하십시오."
+    elif not jd_val or is_poor_text(jd_val):
+        payload["jd_summary"] = "공고 상세 직무 내용 확인 필요"
 
     sal_val = str(payload.get("salary", "")).strip()
     if not sal_val or any(token in sal_val for token in ["협의", "미정", "회사내규", "추후협의"]):
@@ -184,8 +417,9 @@ def normalize_refined_data(item, profile, candidate, fallback_jd_summary):
         payload["company_career_url"] = official_url
 
     payload["detail_url"] = item.get("detail_url", "")
-    payload["deadline"] = item.get("deadline", "~2026.07.05(일)")
-    payload["image_url"] = item.get("image_url", "") or candidate.get("image_url", "")
+    payload["deadline"] = item.get("deadline", "마감일 확인 필요")
+    payload["image_url"] = sanitize_image_url(item.get("image_url", "") or candidate.get("image_url", ""))
+    payload["title"] = clean_job_title(payload.get("title", ""))
 
     fit_score, location_matched = calculate_fit_score(item, profile)
     payload["fit_score"] = fit_score
@@ -194,11 +428,11 @@ def normalize_refined_data(item, profile, candidate, fallback_jd_summary):
 
 def analyze_job_with_llm(item, profile):
     company = item.get("company", "")
-    title = item.get("title", "")
-    image_url = item.get("image_url", "")
+    title = clean_job_title(item.get("title", ""))
+    image_url = sanitize_image_url(item.get("image_url", ""))
     
     deep_data = item.get("deep_scraped", {})
-    jd_summary_raw = deep_data.get("jd_summary", "")
+    jd_summary_raw = sanitize_jd_text(deep_data.get("jd_summary", ""))
     welfare_raw = deep_data.get("welfare_tags", [])
     if isinstance(welfare_raw, list):
         welfare_str = ", ".join(welfare_raw)
@@ -207,9 +441,9 @@ def analyze_job_with_llm(item, profile):
         
     company_insight = item.get("company_insight", {})
     
-    is_text_poor = not jd_summary_raw or "참조" in str(jd_summary_raw) or len(str(jd_summary_raw)) < 30
+    is_text_poor = is_poor_text(jd_summary_raw)
     
-    fallback_jd_summary = jd_summary_raw
+    fallback_jd_summary = summarize_jd_text(jd_summary_raw, title) or jd_summary_raw
     if is_text_poor and image_url:
         fallback_jd_summary = f"<{image_url}|🖼️ 채용 공고 원본 이미지 확인하기>"
         
@@ -243,11 +477,12 @@ Official Listing Details URL (Original Site): {deep_data.get("official_detail_ur
 - requirements: summary of minimum qualifications / requirements
 - preferences: summary of preferred skills / qualities
 - jd_summary:
-    - If the original raw text contains detailed responsibilities/tasks, refine and summarize it cleanly.
+    - If the original raw text contains detailed responsibilities/tasks, refine and summarize it cleanly in one concise Korean sentence.
     - If the raw text is empty, poor, or just says "공고 참조", "상세 참조", you MUST return this markdown hyperlink exact format using the Fallback Image URL: "<Fallback_Image_URL|🖼️ 채용 공고 원본 이미지 확인하기 (클릭 시 이동)>"
 - job_keywords:
     - Compile 3 to 5 keywords helper for writing self-introduction.
-    - Focus on company values, talent traits, key skills, and tips for personal essays.
+    - Focus on company values, talent traits, key skills, and the company's business direction from Company Insight.
+    - Do not use generic placeholders such as #직무역량, #자소서작성, #성장가능성.
     - MUST format each keyword as a string starting with "#" (e.g. "#인재상키워드", "#Python실무", "#자소서팁")
 - company_career_url: If Official Listing Details URL (Original Site) is provided, you MUST output it as company_career_url. Otherwise, provide the official corporate career site link. If not found, use google search query format: "https://www.google.com/search?q={{company_encoded_name}}+채용+페이지" (where {{company_encoded_name}} is the company name)
 - image_url: Provide the original listing image URL

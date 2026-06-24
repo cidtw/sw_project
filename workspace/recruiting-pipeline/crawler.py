@@ -13,21 +13,40 @@ from common import DB_PATH, FETCH_OUTPUT_PATH, normalized_job_key, write_json
 
 BASE_URL = "https://www.jobkorea.co.kr"
 STARTER_URL = "https://www.jobkorea.co.kr/starter/"
-DEFAULT_IMAGE = "https://images.unsplash.com/photo-1586281380349-632531db7ed4?w=500"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8"
 }
+KOREAN_WEEKDAYS = ["월", "화", "수", "목", "금", "토", "일"]
+UNKNOWN_DEADLINE = "마감일 확인 필요"
 
 def get_normalized_key(company, title):
     return normalized_job_key(company, title)
 
+
+def clean_listing_title(value):
+    title = re.sub(r'\s+', ' ', str(value or '')).strip()
+    title = re.sub(r'D[-_]?\d+\s*스크랩', '', title, flags=re.IGNORECASE)
+    title = re.sub(r'D[-_]?\d+', '', title, flags=re.IGNORECASE)
+    title = title.replace('스크랩', '')
+    return title.strip()
+
 def parse_clean_deadline(deadline_str):
     if not deadline_str:
-        return "~2026.07.05(일)"
+        return UNKNOWN_DEADLINE
     
-    deadline_str = deadline_str.strip()
+    deadline_str = re.sub(r'\s+', ' ', str(deadline_str)).strip()
+    deadline_str = deadline_str.replace("스크랩", " ").strip()
+    if not deadline_str:
+        return UNKNOWN_DEADLINE
+
+    if re.search(r'(상시|채용시|수시|접수중|open\s*until\s*filled)', deadline_str, re.IGNORECASE):
+        if "상시" in deadline_str:
+            return "상시채용"
+        if "채용시" in deadline_str:
+            return "채용시 마감"
+        return "수시채용"
     
     # 1. Check for YYYY.MM.DD or YYYY-MM-DD pattern first
     match_yyyy_mm_dd = re.search(r'(\d{4})[./-](\d{2})[./-](\d{2})(?:\(([^)]+)\))?', deadline_str)
@@ -41,8 +60,7 @@ def parse_clean_deadline(deadline_str):
         else:
             try:
                 dt = datetime.datetime(int(year), int(month), int(day))
-                weeks = ['월', '화', '수', '목', '금', '토', '일']
-                day_of_week = weeks[dt.weekday()]
+                day_of_week = KOREAN_WEEKDAYS[dt.weekday()]
                 return f"~ {year}.{month}.{day}({day_of_week})"
             except Exception:
                 return f"~ {year}.{month}.{day}"
@@ -64,8 +82,7 @@ def parse_clean_deadline(deadline_str):
         else:
             try:
                 dt = datetime.datetime(year, int(month), int(day))
-                weeks = ['월', '화', '수', '목', '금', '토', '일']
-                day_of_week = weeks[dt.weekday()]
+                day_of_week = KOREAN_WEEKDAYS[dt.weekday()]
                 return f"~ {year}.{month}.{day}({day_of_week})"
             except Exception:
                 return f"~ {year}.{month}.{day}"
@@ -80,25 +97,27 @@ def parse_clean_deadline(deadline_str):
         else:
             days_to_add = int(d_val)
         target_date = now + datetime.timedelta(days=days_to_add)
-        weeks = ['월', '화', '수', '목', '금', '토', '일']
-        dow = weeks[target_date.weekday()]
+        dow = KOREAN_WEEKDAYS[target_date.weekday()]
         return f"~ {target_date.year}.{target_date.strftime('%m')}.{target_date.strftime('%d')}({dow})"
 
     # 4. Check for "오늘" (today)
-    if "오늘" in deadline_str:
+    if "오늘" in deadline_str or "금일" in deadline_str:
         now = datetime.datetime.now()
-        weeks = ['월', '화', '수', '목', '금', '토', '일']
-        dow = weeks[now.weekday()]
+        dow = KOREAN_WEEKDAYS[now.weekday()]
         return f"~ {now.year}.{now.strftime('%m')}.{now.strftime('%d')}({dow})"
         
     # 5. Check for "내일" (tomorrow)
     if "내일" in deadline_str:
         tomorrow = datetime.datetime.now() + datetime.timedelta(days=1)
-        weeks = ['월', '화', '수', '목', '금', '토', '일']
-        dow = weeks[tomorrow.weekday()]
+        dow = KOREAN_WEEKDAYS[tomorrow.weekday()]
         return f"~ {tomorrow.year}.{tomorrow.strftime('%m')}.{tomorrow.strftime('%d')}({dow})"
-        
-    return deadline_str
+
+    # Listing cards sometimes expose the whole card text as the deadline.
+    # Do not let company/title text leak into Slack as a bogus closing date.
+    if len(deadline_str) > 20 or re.search(r'(모집|채용|개발|관리|담당|경력|신입|정규직|계약직)', deadline_str):
+        return UNKNOWN_DEADLINE
+
+    return deadline_str if re.search(r'(마감|D-|Dday|D-day)', deadline_str, re.IGNORECASE) else UNKNOWN_DEADLINE
 
 def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -212,9 +231,9 @@ def parse_starter_page(html):
         for href, title in matches[:15]:
             listings.append({
                 "company": "알수없음",
-                "title": title.strip(),
+                "title": clean_listing_title(title),
                 "detail_url": BASE_URL + href,
-                "deadline": "~2026.07.05(일)"
+                "deadline": UNKNOWN_DEADLINE
             })
         return listings
 
@@ -226,7 +245,7 @@ def parse_starter_page(html):
             title_el = item.select_one('span.tx, a.link, a.AgiLink, .titLink, .title a')
             if not title_el:
                 continue
-            title = title_el.get_text(strip=True)
+            title = clean_listing_title(title_el.get_text(strip=True))
             
             link_el = item.select_one('a.AgiLink')
             href = ""
@@ -239,13 +258,13 @@ def parse_starter_page(html):
                 href = BASE_URL + href
                 
             deadline_el = item.select_one('.day, .date, .time, .deadline')
-            deadline = deadline_el.get_text(strip=True) if deadline_el else "~2026.07.05(일)"
+            deadline = deadline_el.get_text(strip=True) if deadline_el else UNKNOWN_DEADLINE
             
             listings.append({
                 "company": company,
                 "title": title,
                 "detail_url": href,
-                "deadline": deadline
+                "deadline": parse_clean_deadline(deadline)
             })
         except Exception:
             continue
@@ -303,7 +322,7 @@ def deep_scrape_detail(url):
             jd_summary = " ".join(paragraphs[:3])
             
     if not jd_summary or len(jd_summary) < 10:
-        jd_summary = "공고 상세 직무 내용을 참조하십시오."
+        jd_summary = "공고 상세 직무 내용 확인 필요"
         
     # 4. 이미지 주소 스캔
     scraped_image_url = ""
@@ -369,16 +388,14 @@ def crawl_jobkorea():
     for item in listings[:5]:
         print(f"Deep scraping detail page: {item['detail_url']}")
         detail_info = deep_scrape_detail(item['detail_url'])
-        image_url = detail_info.get("scraped_image_url")
-        if not image_url:
-            image_url = DEFAULT_IMAGE
+        image_url = detail_info.get("scraped_image_url", "")
             
         results.append({
             "platform": "JobKorea",
             "company": item.get("company", "알수없음"),
             "title": item.get("title", ""),
             "detail_url": item.get("detail_url", ""),
-            "deadline": parse_clean_deadline(item.get("deadline", "~2026.07.05(일)")),
+            "deadline": parse_clean_deadline(item.get("deadline", UNKNOWN_DEADLINE)),
             "image_url": image_url,
             "deep_scraped": detail_info,
             "extracted_info": {
@@ -412,18 +429,16 @@ def crawl_saramin():
             href = title_el.get('href', '')
             if not href:
                 continue
-            title = title_el.get_text(strip=True)
+            title = clean_listing_title(title_el.get_text(strip=True))
             if not href.startswith('http'):
                 href = "https://www.saramin.co.kr" + href
                 
             deadline_el = item.select_one('.date')
-            deadline = parse_clean_deadline(deadline_el.get_text(strip=True) if deadline_el else "~2026.07.05(일)")
+            deadline = parse_clean_deadline(deadline_el.get_text(strip=True) if deadline_el else UNKNOWN_DEADLINE)
             
             print(f"Deep scraping Saramin detail: {href}")
             detail_info = deep_scrape_detail(href)
-            image_url = detail_info.get("scraped_image_url")
-            if not image_url:
-                image_url = DEFAULT_IMAGE
+            image_url = detail_info.get("scraped_image_url", "")
                 
             results.append({
                 "platform": "Saramin",
@@ -469,18 +484,16 @@ def crawl_incruit():
             href = title_el.get('href', '')
             if not href:
                 continue
-            title = title_el.get_text(strip=True)
+            title = clean_listing_title(title_el.get_text(strip=True))
             if not href.startswith('http'):
                 href = "https://job.incruit.com" + href
                 
             deadline_el = item.select_one('span.date, span.dday')
-            deadline = parse_clean_deadline(deadline_el.get_text(strip=True) if deadline_el else "~2026.07.05(일)")
+            deadline = parse_clean_deadline(deadline_el.get_text(strip=True) if deadline_el else UNKNOWN_DEADLINE)
             
             print(f"Deep scraping Incruit detail: {href}")
             detail_info = deep_scrape_detail(href)
-            image_url = detail_info.get("scraped_image_url")
-            if not image_url:
-                image_url = DEFAULT_IMAGE
+            image_url = detail_info.get("scraped_image_url", "")
                 
             results.append({
                 "platform": "Incruit",

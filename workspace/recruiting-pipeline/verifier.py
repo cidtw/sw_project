@@ -4,6 +4,11 @@ import sys
 
 from common import FETCH_OUTPUT_PATH, SCORE_OUTPUT_PATH, VERIFY_OUTPUT_PATH, read_json, write_json
 
+GENERIC_REQUIREMENTS = {"공고 자격요건 및 전공 요건 참조", "자격요건 참조"}
+GENERIC_PREFERENCES = {"우대 스택 및 동종 업계 경력 우대", "우대사항 참조"}
+GENERIC_KEYWORDS = {"#직무역량", "#자소서작성", "#성장가능성"}
+PLACEHOLDER_IMAGE = "images.unsplash.com/photo-1586281380349-632531db7ed4"
+
 def main():
     print("--- Running standalone verifier.py ---")
     input_path = SCORE_OUTPUT_PATH
@@ -42,6 +47,21 @@ def main():
 
         if not isinstance(item.get("job_keywords"), list) or len(item["job_keywords"]) < 3:
             errors.append(f"Item {idx} invalid job_keywords: {item.get('job_keywords')}")
+        elif set(item["job_keywords"]) == GENERIC_KEYWORDS or GENERIC_KEYWORDS.issubset(set(item["job_keywords"])):
+            errors.append(f"Item {idx} uses generic job_keywords: {item.get('job_keywords')}")
+
+        if str(item.get("requirements", "")).strip() in GENERIC_REQUIREMENTS:
+            errors.append(f"Item {idx} uses generic requirements: {item.get('requirements')}")
+
+        if str(item.get("preferences", "")).strip() in GENERIC_PREFERENCES:
+            errors.append(f"Item {idx} uses generic preferences: {item.get('preferences')}")
+
+        jd_summary = str(item.get("jd_summary", ""))
+        if PLACEHOLDER_IMAGE in jd_summary or PLACEHOLDER_IMAGE in str(item.get("image_url", "")):
+            errors.append(f"Item {idx} uses placeholder image URL")
+
+        if "공고 상세 직무 내용을 참조하십시오" in jd_summary:
+            errors.append(f"Item {idx} uses legacy jd_summary fallback: {jd_summary}")
 
         analysis = item.get("analysis")
         if not isinstance(analysis, dict):
