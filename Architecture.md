@@ -142,7 +142,8 @@ flowchart TD
 - `btn_search_jobs`: 일반 공고 검색 모달 열기. 기본 검색 범위는 제목, 회사명, 지역, 자격요건, 우대요건, 직무기술서, 키워드를 포함한 전체 텍스트입니다.
 - `btn_search_page_prev` / `btn_search_page_next`: 검색 결과 페이지 이동
 - `btn_search_jobs_again`: 검색 모달 다시 열기
-- `btn_scrap_jobs`: 스크랩 소스 선택 메뉴 열기
+- `btn_scrap_single`: 최신 업데이트, 맞춤 추천, 일반 검색 결과에서 단일 공고 스크랩
+- `btn_scrap_jobs`: 스크랩 소스 선택 메뉴 열기, 보조 경로
 - `btn_scrap_source_crawled`: 최근 크롤링 공고 중 스크랩할 공고 선택
 - `btn_scrap_source_recommended`: 맞춤 추천 공고 중 스크랩할 공고 선택
 - `btn_scrap_source_search`: 최근 검색 결과 중 스크랩할 공고 선택

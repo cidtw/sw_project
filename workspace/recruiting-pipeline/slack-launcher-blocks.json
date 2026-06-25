@@ -47,10 +47,10 @@
           "type": "button",
           "text": {
             "type": "plain_text",
-            "text": "📌 공고 스크랩",
+            "text": "📌 스크랩된 공고 보기",
             "emoji": true
           },
-          "action_id": "btn_scrap_jobs"
+          "action_id": "btn_scrap_view"
         },
         {
           "type": "button",

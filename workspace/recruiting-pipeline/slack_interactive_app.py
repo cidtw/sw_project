@@ -717,10 +717,11 @@ def normalize_job_for_storage(item, user_id=""):
     return payload
 
 
-def cache_selection_jobs(user_id, source, jobs):
+def cache_selection_jobs(user_id, source, jobs, limit=None):
     init_profile_db()
     now = now_utc()
-    normalized_jobs = [normalize_job_for_storage(job, user_id) for job in jobs[:SCRAP_SELECTION_LIMIT]]
+    selected_jobs = jobs[:limit] if limit else jobs[:MAX_SEARCH_RESULTS]
+    normalized_jobs = [normalize_job_for_storage(job, user_id) for job in selected_jobs]
     with sqlite3.connect(PROFILE_DB_PATH, timeout=15.0) as conn:
         conn.execute("DELETE FROM user_job_selection_cache WHERE user_id = ? AND source = ?", (user_id, source))
         for rank, payload in enumerate(normalized_jobs, start=1):
@@ -737,6 +738,22 @@ def cache_selection_jobs(user_id, source, jobs):
             )
         conn.commit()
     return normalized_jobs
+
+
+def scrap_button_value(source, payload):
+    return json.dumps(
+        {"s": source, "k": payload.get("_job_key") or job_key_for_payload(payload)},
+        ensure_ascii=False,
+    )
+
+
+def build_single_scrap_button(payload, source):
+    return {
+        "type": "button",
+        "text": {"type": "plain_text", "text": "스크랩"},
+        "action_id": "btn_scrap_single",
+        "value": scrap_button_value(source, payload),
+    }
 
 
 def load_selection_cache(user_id, source):
@@ -960,14 +977,15 @@ def build_search_result_blocks(query, target, include_closed, candidates, page, 
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": (
-                            f"*{idx}. {payload['company']}*  ·  `{platform}`\n"
-                            f"{title_text}\n"
-                            f"지역: {payload['location']}  |  마감: {deadline}"
-                        ),
-                    },
-                }
-            )
+                    "text": (
+                        f"*{idx}. {payload['company']}*  ·  `{platform}`\n"
+                        f"{title_text}\n"
+                        f"지역: {payload['location']}  |  마감: {deadline}"
+                    ),
+                },
+                "accessory": build_single_scrap_button(item, "search"),
+            }
+        )
             
     blocks.append({"type": "divider"})
     
@@ -1150,14 +1168,14 @@ def build_scrap_saved_blocks(saved_jobs):
             "elements": [
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "스크랩 메뉴로 돌아가기"},
-                    "action_id": "btn_scrap_jobs",
-                },
-                {
-                    "type": "button",
                     "style": "primary",
                     "text": {"type": "plain_text", "text": "스크랩된 공고 보기"},
                     "action_id": "btn_scrap_view",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "초기 메뉴"},
+                    "action_id": "btn_show_launcher",
                 },
             ],
         }
@@ -1280,7 +1298,7 @@ def slash_help_text(command):
         f"`{command} 업데이트` : 최신 채용공고 수집\n"
         f"`{command} 검색` : 내 프로필 기준 맞춤 공고 추천\n"
         f"`{command} 공고검색` : 일반 채용공고 키워드 검색\n"
-        f"`{command} 스크랩` : 공고 스크랩 메뉴\n"
+        f"`{command} 스크랩` : 스크랩된 공고 보기\n"
         f"`{command} 프로필` : 개인정보 입력/수정\n"
         f"`{command} 설정` : 검색/알림 환경설정"
     )
@@ -1299,8 +1317,19 @@ def extract_job_search_query(text):
     return ""
 
 
-def build_job_blocks(payload, headline="맞춤 채용공고 추천", next_index=None):
+def build_job_blocks(
+    payload,
+    headline="맞춤 채용공고 추천",
+    prev_index=None,
+    next_index=None,
+    user_id="",
+    scrap_source="recommended",
+):
     payload = normalize_schema_payload(payload, payload.get("dispatch_type", "SEARCH"), payload.get("slack_user_id", ""))
+    if user_id:
+        cached = cache_selection_jobs(user_id, scrap_source, [payload], 1)
+        if cached:
+            payload = cached[0]
     keywords = " ".join(payload.get("job_keywords", []))
     blocks = [
         {
@@ -1339,6 +1368,17 @@ def build_job_blocks(payload, headline="맞춤 채용공고 추천", next_index=
                 "text": {"type": "plain_text", "text": "공고 보기"},
                 "url": payload["detail_url"],
                 "action_id": "btn_open_detail",
+            }
+        )
+    if user_id:
+        action_elements.append(build_single_scrap_button(payload, scrap_source))
+    if prev_index is not None:
+        action_elements.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "이전 추천"},
+                "action_id": "btn_prev_recommendation",
+                "value": str(prev_index),
             }
         )
     if next_index is not None:
@@ -1558,6 +1598,9 @@ def cell(value, width):
 
 
 def build_job_table_blocks(candidates, user_id="", title="채용공고 업데이트", limit=10):
+    candidates = candidates[:limit]
+    if user_id and candidates:
+        candidates = cache_selection_jobs(user_id, "crawled", candidates, limit)
     mention = f"<@{user_id}>님, " if user_id else ""
     blocks = [
         {
@@ -1584,7 +1627,7 @@ def build_job_table_blocks(candidates, user_id="", title="채용공고 업데이
         )
         return blocks
 
-    for idx, item in enumerate(candidates[:limit], start=1):
+    for idx, item in enumerate(candidates, start=1):
         payload = normalize_schema_payload(item, "SEARCH", user_id)
         platform = detect_platform(item)
         deadline = clean_text(item.get("deadline", "")) or "마감일 확인 필요"
@@ -1602,8 +1645,9 @@ def build_job_table_blocks(candidates, user_id="", title="채용공고 업데이
                         f"지역: {payload['location']}  |  마감: {deadline}"
                     ),
                 },
+                **({"accessory": build_single_scrap_button(item, "crawled")} if user_id else {}),
             }
-        )
+            )
     return blocks
 
 
@@ -1612,6 +1656,43 @@ def post_ephemeral(response_url, payload):
     payload.setdefault("response_type", "ephemeral")
     payload.setdefault("replace_original", False)
     post_response(response_url, payload)
+
+
+def is_ephemeral_interaction(data):
+    container = data.get("container", {}) or {}
+    message = data.get("message", {}) or {}
+    return bool(container.get("is_ephemeral") or message.get("is_ephemeral"))
+
+
+def post_ephemeral_navigation(response_url, payload, data):
+    payload = payload.copy()
+    payload.setdefault("response_type", "ephemeral")
+    payload.setdefault("replace_original", is_ephemeral_interaction(data))
+    post_response(response_url, payload)
+
+
+def build_scrap_ack_blocks(data, saved_jobs):
+    blocks = data.get("message", {}).get("blocks") or []
+    if not blocks:
+        return []
+    blocks = [block for block in blocks if not str(block.get("block_id", "")).startswith("scrap_ack_")]
+    first_job = saved_jobs[0] if saved_jobs else {}
+    company = clean_text(first_job.get("company", ""))
+    title = clean_text(first_job.get("title", ""))
+    label = f"{company} · {title}".strip(" ·") or "선택한 공고"
+    blocks.append(
+        {
+            "type": "context",
+            "block_id": f"scrap_ack_{now_utc().replace(':', '').replace('-', '').replace('.', '')[:30]}",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"저장 완료: *{label[:80]}*",
+                }
+            ],
+        }
+    )
+    return blocks
 
 
 def run_pipeline_and_post_table(response_url, user_id):
@@ -1655,6 +1736,7 @@ def build_custom_job_blocks(user_id, profile, start_index=0):
     if ranked:
         selected_index = start_index % len(ranked)
         best = normalize_schema_payload(ranked[selected_index], "SEARCH", user_id)
+        prev_index = (selected_index - 1) % len(ranked) if len(ranked) > 1 else None
         next_index = (selected_index + 1) % len(ranked) if len(ranked) > 1 else None
         headline = f"AI 맞춤 채용공고 추천 ({selected_index + 1}/{len(ranked)})"
     else:
@@ -1664,9 +1746,17 @@ def build_custom_job_blocks(user_id, profile, start_index=0):
             "profile": profile_to_search_profile(profile),
         }
         best = run_search(request)
+        prev_index = None
         next_index = None
         headline = "AI 맞춤 채용공고 추천"
-    return build_job_blocks(best, headline, next_index=next_index)
+    return build_job_blocks(
+        best,
+        headline,
+        prev_index=prev_index,
+        next_index=next_index,
+        user_id=user_id,
+        scrap_source="recommended",
+    )
 
 
 def get_recommended_jobs(user_id, profile, limit=10):
@@ -1676,7 +1766,20 @@ def get_recommended_jobs(user_id, profile, limit=10):
         "query": " ".join(profile_to_search_profile(profile).get("근무희망지역", [])),
         "profile": profile_to_search_profile(profile),
     }
-    candidates = filter_candidates_by_preferences(load_candidates(), preferences)
+    candidates = []
+    seen = set()
+    for item in filter_candidates_by_preferences(load_candidates(), preferences):
+        item = normalize_job_for_storage(item, user_id)
+        key = job_key_for_payload(item)
+        if key and key not in seen:
+            seen.add(key)
+            candidates.append(item)
+    for item in load_recent_open_jobs(max(limit * 3, 50), preferences):
+        item = normalize_job_for_storage(item, user_id)
+        key = job_key_for_payload(item)
+        if key and key not in seen:
+            seen.add(key)
+            candidates.append(item)
     if not candidates:
         return []
     return sorted(candidates, key=lambda item: hard_match_score(item, request["profile"], request["query"]), reverse=True)[:limit]
@@ -1684,12 +1787,12 @@ def get_recommended_jobs(user_id, profile, limit=10):
 
 def get_scrap_source_jobs(user_id, source):
     if source == "crawled":
-        return cache_selection_jobs(user_id, source, load_recent_open_jobs(SCRAP_SELECTION_LIMIT, get_user_preferences(user_id)))
+        return cache_selection_jobs(user_id, source, load_recent_open_jobs(SCRAP_SELECTION_LIMIT, get_user_preferences(user_id)), SCRAP_SELECTION_LIMIT)
     if source == "recommended":
         profile = get_user_profile(user_id)
         if not profile:
             return []
-        return cache_selection_jobs(user_id, source, get_recommended_jobs(user_id, profile, SCRAP_SELECTION_LIMIT))
+        return cache_selection_jobs(user_id, source, get_recommended_jobs(user_id, profile, SCRAP_SELECTION_LIMIT), SCRAP_SELECTION_LIMIT)
     if source == "search":
         return load_selection_cache(user_id, source)
     return []
@@ -1854,16 +1957,15 @@ async def handle_slack_interactive(payload: str = Form(...)):
                     },
                 )
         else:
-            post_response(
+            post_ephemeral_navigation(
                 response_url,
                 {
-                    "response_type": "ephemeral",
-                    "replace_original": False,
                     "blocks": build_custom_job_blocks(user_id, user_profile),
                 },
+                data,
             )
 
-    elif action_id == "btn_next_recommendation":
+    elif action_id in ("btn_next_recommendation", "btn_prev_recommendation"):
         user_profile = get_user_profile(user_id)
         if not user_profile:
             ok, message = open_slack_modal(trigger_id)
@@ -1915,22 +2017,51 @@ async def handle_slack_interactive(payload: str = Form(...)):
                 },
             )
 
+    elif action_id == "btn_scrap_single":
+        try:
+            value = json.loads(actions[0].get("value", "{}"))
+        except json.JSONDecodeError:
+            value = {}
+        source = value.get("s", "")
+        job_key = value.get("k", "")
+        saved_jobs = save_scrap_jobs(user_id, source, [job_key])
+        if saved_jobs:
+            ack_blocks = build_scrap_ack_blocks(data, saved_jobs)
+            if ack_blocks and is_ephemeral_interaction(data):
+                post_response(
+                    response_url,
+                    {
+                        "replace_original": True,
+                        "text": "스크랩 저장 완료",
+                        "blocks": ack_blocks,
+                    },
+                )
+        else:
+            post_ephemeral(
+                response_url,
+                {
+                    "text": "스크랩 후보 정보를 찾을 수 없습니다. 결과를 다시 조회한 뒤 스크랩해 주세요.",
+                },
+            )
+
     elif action_id in ("btn_scrap_jobs", "btn_scrap_menu"):
-        post_ephemeral(
+        post_ephemeral_navigation(
             response_url,
             {
                 "text": "공고 스크랩",
                 "blocks": build_scrap_menu_blocks(user_id),
             },
+            data,
         )
 
     elif action_id == "btn_show_launcher":
-        post_ephemeral(
+        post_ephemeral_navigation(
             response_url,
             {
                 "text": "스마트 AI 맞춤형 채용 비서 서비스",
                 "blocks": build_launcher_blocks(user_id),
             },
+            data,
         )
 
     elif action_id in ("btn_scrap_source_crawled", "btn_scrap_source_recommended", "btn_scrap_source_search"):
@@ -1949,12 +2080,13 @@ async def handle_slack_interactive(payload: str = Form(...)):
             post_ephemeral(response_url, {"text": f"스크랩 선택 모달을 열 수 없습니다. ({message})"})
 
     elif action_id == "btn_scrap_view":
-        post_ephemeral(
+        post_ephemeral_navigation(
             response_url,
             {
                 "text": "스크랩된 공고",
                 "blocks": build_scrapped_jobs_blocks(user_id),
             },
+            data,
         )
 
     elif action_id == "btn_search_jobs":
@@ -2039,8 +2171,8 @@ async def handle_slack_command(
     if command_matches(normalized_text, "스크랩", "scrap", "bookmark"):
         return {
             "response_type": "ephemeral",
-            "text": "공고 스크랩",
-            "blocks": build_scrap_menu_blocks(user_id),
+            "text": "스크랩된 공고",
+            "blocks": build_scrapped_jobs_blocks(user_id),
         }
 
     if command_matches(normalized_text, "검색", "추천", "맞춤", "search", "recommend"):
