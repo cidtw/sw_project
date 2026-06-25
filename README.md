@@ -37,6 +37,7 @@ workspace/recruiting-pipeline/
 ├── pipeline.py
 ├── chatbot_search.py
 ├── slack_interactive_app.py
+├── run_server.py
 ├── slack-launcher-blocks.json
 ├── slack-search-preferences-modal.json
 ├── data/                 # git ignore
@@ -79,6 +80,8 @@ Usage Hint:
 /recruit
 /recruit 업데이트
 /recruit 검색
+/recruit 공고검색
+/recruit 공고검색 AI
 /recruit 프로필
 /recruit 설정
 ```
@@ -117,6 +120,7 @@ python -X utf8 pipeline.py
 - `공고 실시간 업데이트`: `pipeline.py`를 백그라운드 실행하고 최신순 채용 중 공고 10개를 카드 목록으로 표시합니다.
 - `맞춤형 채용공고 찾기`: 저장된 개인정보와 환경설정을 기준으로 추천 공고 1건을 표시합니다.
 - `다른 추천 채용`: 다음 추천 공고로 카드를 교체합니다.
+- `일반 공고 검색`: 제목, 회사명, 지역, 자격요건, 우대요건, 직무기술서, 키워드까지 포함한 전체 텍스트 검색을 기본값으로 사용하고, 검색 결과를 페이지 단위 ephemeral 메시지로 표시합니다.
 - `개인정보 확인/수정`: Slack Modal로 사용자 프로필을 저장합니다.
 - `입력 정보 전체 삭제`: 저장된 개인정보를 삭제하고 삭제 완료 모달로 전환합니다.
 - `환경설정`: 제외 사이트, 제외 키워드, 고용형태, 마감임박 포함 여부, 경력 필터, 푸시 알림 여부를 저장합니다.

@@ -21,6 +21,7 @@ project/
         ├── pipeline.py
         ├── chatbot_search.py
         ├── slack_interactive_app.py
+        ├── run_server.py
         ├── slack-launcher-blocks.json
         ├── slack-search-preferences-modal.json
         ├── data/                 # ignored
@@ -126,6 +127,8 @@ flowchart TD
 /recruit
 /recruit 업데이트
 /recruit 검색
+/recruit 공고검색
+/recruit 공고검색 AI
 /recruit 프로필
 /recruit 설정
 ```
@@ -135,6 +138,9 @@ flowchart TD
 - `btn_live_update`: 파이프라인 실행 후 최신 채용 중 공고 10개 표시
 - `btn_custom_search`: 개인 프로필 기반 추천 공고 표시
 - `btn_next_recommendation`: 다음 추천 공고로 카드 교체
+- `btn_search_jobs`: 일반 공고 검색 모달 열기. 기본 검색 범위는 제목, 회사명, 지역, 자격요건, 우대요건, 직무기술서, 키워드를 포함한 전체 텍스트입니다.
+- `btn_search_page_prev` / `btn_search_page_next`: 검색 결과 페이지 이동
+- `btn_search_jobs_again`: 검색 모달 다시 열기
 - `btn_user_profile`: 개인정보 입력/수정 모달
 - `btn_delete_profile`: 개인정보 삭제 후 완료 모달
 - `btn_search_preferences`: 검색/알림 환경설정 모달

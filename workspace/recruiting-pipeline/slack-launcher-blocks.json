@@ -35,6 +35,16 @@
         },
         {
           "type": "button",
+          "style": "primary",
+          "text": {
+            "type": "plain_text",
+            "text": "🔎 일반 공고 검색",
+            "emoji": true
+          },
+          "action_id": "btn_search_jobs"
+        },
+        {
+          "type": "button",
           "text": {
             "type": "plain_text",
             "text": "👤 개인정보 확인/수정",

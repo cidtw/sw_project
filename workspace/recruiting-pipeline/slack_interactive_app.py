@@ -25,6 +25,9 @@ SUPPORTED_SITES = ["JobKorea", "Saramin", "Incruit"]
 DEFAULT_EMPLOYMENT_TYPES = "정규직,계약직,인턴,기타"
 DEFAULT_CAREER_TYPES = "신입,경력 무관,경력직"
 CAREER_PERIODS = ["3년 미만", "3년 ~ 5년", "5년 ~ 8년", "8년 ~ 11년", "11년 이상"]
+SEARCH_PAGE_SIZE = 10
+MAX_SEARCH_RESULTS = 200
+VALID_SEARCH_TARGETS = {"all", "both", "title", "company"}
 
 app = FastAPI(title="Recruiting Slack Interactive App")
 
@@ -522,21 +525,343 @@ def build_search_preferences_modal(existing_data=None):
     }
 
 
+def build_job_search_modal(channel_id, initial_query=""):
+    query_element = {
+        "type": "plain_text_input",
+        "action_id": "input_search_query",
+        "placeholder": {"type": "plain_text", "text": "예시) 삼성, AI 개발자, 백엔드"},
+        "multiline": False,
+        "min_length": 1,
+        "max_length": 80,
+    }
+    initial_query = clean_text(initial_query)
+    if initial_query:
+        query_element["initial_value"] = initial_query[:80]
+
+    blocks = [
+        {
+            "type": "input",
+            "block_id": "blk_search_query",
+            "label": {"type": "plain_text", "text": "검색어"},
+            "element": query_element,
+        },
+        {
+            "type": "input",
+            "block_id": "blk_search_target",
+            "label": {"type": "plain_text", "text": "검색 기준"},
+            "element": {
+                "type": "radio_buttons",
+                "action_id": "input_search_target",
+                "initial_option": {
+                    "text": {"type": "plain_text", "text": "전체 텍스트"},
+                    "value": "all"
+                },
+                "options": [
+                    {"text": {"type": "plain_text", "text": "전체 텍스트"}, "value": "all"},
+                    {"text": {"type": "plain_text", "text": "제목 + 회사명"}, "value": "both"},
+                    {"text": {"type": "plain_text", "text": "공고 제목만"}, "value": "title"},
+                    {"text": {"type": "plain_text", "text": "회사명만"}, "value": "company"}
+                ]
+            }
+        },
+        {
+            "type": "input",
+            "optional": True,
+            "block_id": "blk_search_include_closed",
+            "label": {"type": "plain_text", "text": "마감 공고 포함"},
+            "element": {
+                "type": "checkboxes",
+                "action_id": "input_search_include_closed",
+                "options": [
+                    {
+                        "text": {"type": "plain_text", "text": "마감된 공고도 포함하여 검색"},
+                        "value": "include_closed"
+                    }
+                ]
+            }
+        }
+    ]
+    return {
+        "type": "modal",
+        "callback_id": "modal_job_search",
+        "title": {"type": "plain_text", "text": "공고 검색"},
+        "submit": {"type": "plain_text", "text": "검색하기"},
+        "close": {"type": "plain_text", "text": "취소"},
+        "private_metadata": channel_id,
+        "blocks": blocks
+    }
+
+
+def tokenize_search_query(query):
+    return [
+        token.lower()
+        for token in re.split(r"[\s,/#]+", clean_text(query))
+        if token.strip()
+    ]
+
+
+def escape_like_term(term):
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def job_row_to_candidate(row):
+    deep_data = parse_json_field(row["deep_scraped_json"])
+    extracted = parse_json_field(row["extracted_info_json"])
+    return {
+        "dispatch_type": "SEARCH",
+        "platform": clean_text(row["platform"]),
+        "company": clean_text(row["company"]),
+        "title": clean_text(row["title"]),
+        "employment_type": deep_data.get("employment_type") or extracted.get("employment_type") or "확인 필요",
+        "location": deep_data.get("location") or extracted.get("location") or "확인 필요",
+        "salary": deep_data.get("salary") or extracted.get("salary") or "확인 필요",
+        "requirements": extracted.get("requirements") or deep_data.get("requirements") or "",
+        "preferences": extracted.get("preferences") or deep_data.get("preferences") or "",
+        "jd_summary": extracted.get("jd_summary") or deep_data.get("jd_summary") or "",
+        "job_keywords": extracted.get("job_keywords") or [],
+        "detail_url": clean_text(row["detail_url"]),
+        "company_career_url": extracted.get("company_career_url") or "",
+        "image_url": clean_text(row["image_url"]),
+        "deadline": clean_text(row["deadline"]),
+        "scraped_at": row["scraped_at"],
+    }
+
+
+def job_search_text(item, target="all"):
+    keywords = item.get("job_keywords", []) or []
+    if not isinstance(keywords, list):
+        keywords = [keywords]
+    if target == "title":
+        values = [item.get("title", "")]
+    elif target == "company":
+        values = [item.get("company", "")]
+    elif target == "both":
+        values = [item.get("title", ""), item.get("company", "")]
+    else:
+        values = [
+            item.get("company", ""),
+            item.get("title", ""),
+            item.get("platform", ""),
+            item.get("employment_type", ""),
+            item.get("location", ""),
+            item.get("salary", ""),
+            item.get("requirements", ""),
+            item.get("preferences", ""),
+            item.get("jd_summary", ""),
+            " ".join(clean_text(keyword) for keyword in keywords),
+        ]
+    return clean_text(" ".join(str(value or "") for value in values)).lower()
+
+
+def search_relevance_score(item, terms):
+    title = clean_text(item.get("title", "")).lower()
+    company = clean_text(item.get("company", "")).lower()
+    full_text = job_search_text(item, "all")
+    score = 0
+    for term in terms:
+        if term in title:
+            score += 40
+        if term in company:
+            score += 35
+        if term in full_text:
+            score += 10
+    return score
+
+
+def search_jobs_in_db(query, target="all", include_closed=False):
+    target = target if target in VALID_SEARCH_TARGETS else "all"
+    query_terms = tokenize_search_query(query)
+    if not query_terms:
+        return []
+    if not DB_PATH.exists():
+        return []
+
+    where_parts = []
+    params = []
+    for term in query_terms:
+        like_value = f"%{escape_like_term(term)}%"
+        if target == "title":
+            where_parts.append("LOWER(COALESCE(title, '')) LIKE ? ESCAPE '\\'")
+            params.append(like_value)
+        elif target == "company":
+            where_parts.append("LOWER(COALESCE(company, '')) LIKE ? ESCAPE '\\'")
+            params.append(like_value)
+        elif target == "both":
+            where_parts.append(
+                "(LOWER(COALESCE(title, '')) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(company, '')) LIKE ? ESCAPE '\\')"
+            )
+            params.extend([like_value, like_value])
+        else:
+            where_parts.append(
+                """
+                (
+                    LOWER(COALESCE(title, '')) LIKE ? ESCAPE '\\'
+                    OR LOWER(COALESCE(company, '')) LIKE ? ESCAPE '\\'
+                    OR LOWER(COALESCE(platform, '')) LIKE ? ESCAPE '\\'
+                    OR LOWER(COALESCE(deadline, '')) LIKE ? ESCAPE '\\'
+                    OR LOWER(COALESCE(deep_scraped_json, '')) LIKE ? ESCAPE '\\'
+                    OR LOWER(COALESCE(extracted_info_json, '')) LIKE ? ESCAPE '\\'
+                )
+                """
+            )
+            params.extend([like_value] * 6)
+    where_sql = " AND ".join(where_parts)
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT platform, company, title, detail_url, deadline, image_url,
+                       deep_scraped_json, extracted_info_json, scraped_at
+                FROM jobs
+                WHERE {where_sql}
+                ORDER BY datetime(scraped_at) DESC, rowid DESC
+                LIMIT ?
+                """,
+                (*params, MAX_SEARCH_RESULTS * 2),
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+
+    filtered = []
+    for row in rows:
+        item = job_row_to_candidate(row)
+        if not include_closed and is_closed_deadline(item.get("deadline", "")):
+            continue
+        searchable_text = job_search_text(item, target)
+        if not all(term in searchable_text for term in query_terms):
+            continue
+        item["_search_score"] = search_relevance_score(item, query_terms)
+        filtered.append(item)
+
+    filtered.sort(key=lambda item: (item.get("_search_score", 0), clean_text(item.get("scraped_at", ""))), reverse=True)
+    return filtered[:MAX_SEARCH_RESULTS]
+
+
+def build_search_result_blocks(query, target, include_closed, candidates, page, channel_id):
+    target = target if target in VALID_SEARCH_TARGETS else "all"
+    page = max(0, int(page or 0))
+    limit = SEARCH_PAGE_SIZE
+    total_items = len(candidates)
+    total_pages = (total_items + limit - 1) // limit if total_items > 0 else 0
+    if total_pages:
+        page = min(page, total_pages - 1)
+    
+    headline = f"🔍 공고 검색 결과 ({page + 1}/{total_pages} 페이지)" if total_pages > 0 else "🔍 공고 검색 결과"
+    target_labels = {
+        "all": "전체 텍스트",
+        "both": "제목+회사명",
+        "title": "공고 제목",
+        "company": "회사명",
+    }
+    target_str = target_labels.get(target, "전체 텍스트")
+    closed_str = "포함" if include_closed else "제외"
+    
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": headline[:150]},
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"검색어: *'{clean_text(query)}'* (기준: *{target_str}* | 마감: *{closed_str}*) · 총 *{total_items}*건",
+                }
+            ],
+        },
+        {"type": "divider"},
+    ]
+    
+    if not candidates:
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"*'{clean_text(query)}'* 에 해당하는 검색 결과가 없습니다. 검색 조건을 변경하거나 다시 검색해 주세요."},
+            }
+        )
+    else:
+        start_idx = page * limit
+        end_idx = min(start_idx + limit, total_items)
+        
+        for idx, item in enumerate(candidates[start_idx:end_idx], start=start_idx + 1):
+            payload = normalize_schema_payload(item, "SEARCH", "")
+            platform = detect_platform(item)
+            deadline = clean_text(item.get("deadline", "")) or "마감일 확인 필요"
+            title_text = payload["title"]
+            if payload["detail_url"]:
+                title_text = f"<{payload['detail_url']}|{payload['title']}>"
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"*{idx}. {payload['company']}*  ·  `{platform}`\n"
+                            f"{title_text}\n"
+                            f"지역: {payload['location']}  |  마감: {deadline}"
+                        ),
+                    },
+                }
+            )
+            
+    blocks.append({"type": "divider"})
+    
+    action_elements = []
+    if total_pages > 1:
+        if page > 0:
+            action_elements.append({
+                "type": "button",
+                "text": {"type": "plain_text", "text": "◀ 이전"},
+                "action_id": "btn_search_page_prev",
+                "value": json.dumps({"q": query, "t": target, "ic": include_closed, "p": page - 1, "c": channel_id}, ensure_ascii=False)
+            })
+        if page < total_pages - 1:
+            action_elements.append({
+                "type": "button",
+                "text": {"type": "plain_text", "text": "다음 ▶"},
+                "action_id": "btn_search_page_next",
+                "value": json.dumps({"q": query, "t": target, "ic": include_closed, "p": page + 1, "c": channel_id}, ensure_ascii=False)
+            })
+            
+    action_elements.append({
+        "type": "button",
+        "text": {"type": "plain_text", "text": "🔎 다시 검색"},
+        "action_id": "btn_search_jobs_again",
+        "value": channel_id
+    })
+    
+    blocks.append({
+        "type": "actions",
+        "elements": action_elements
+    })
+    
+    return blocks
+
+
 def call_slack_api(method, payload):
     if not SLACK_BOT_TOKEN:
         return False, "SLACK_BOT_TOKEN is not set"
 
-    response = requests.post(
-        f"{SLACK_API_BASE}/{method}",
-        headers={
-            "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
-            "Content-Type": "application/json; charset=utf-8",
-        },
-        json=payload,
-        timeout=10,
-    )
-    body = response.json()
-    return bool(body.get("ok")), json.dumps(body, ensure_ascii=False)
+    try:
+        response = requests.post(
+            f"{SLACK_API_BASE}/{method}",
+            headers={
+                "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+            json=payload,
+            timeout=10,
+        )
+        body = response.json()
+        if not body.get("ok"):
+            print(f"[SLACK API] {method} failed: status={response.status_code}, error={body.get('error')}")
+        return bool(body.get("ok")), json.dumps(body, ensure_ascii=False)
+    except Exception as e:
+        print(f"[SLACK API] {method} request failed: {e}")
+        return False, str(e)
 
 
 def open_slack_modal(trigger_id, existing_data=None):
@@ -554,7 +879,12 @@ def update_slack_modal(view_id, view):
 def post_response(response_url, payload):
     if not response_url:
         return
-    requests.post(response_url, json=payload, timeout=10)
+    try:
+        response = requests.post(response_url, json=payload, timeout=10)
+        if response.status_code >= 400:
+            print(f"[SLACK RESPONSE_URL] failed: status={response.status_code}, body={response.text[:200]}")
+    except Exception as e:
+        print(f"[SLACK RESPONSE_URL] request failed: {e}")
 
 
 def build_launcher_blocks(user_id="", user_name="회원님"):
@@ -575,6 +905,7 @@ def slash_help_text(command):
         f"`{command}` : 메뉴 열기\n"
         f"`{command} 업데이트` : 최신 채용공고 수집\n"
         f"`{command} 검색` : 내 프로필 기준 맞춤 공고 추천\n"
+        f"`{command} 공고검색` : 일반 채용공고 키워드 검색\n"
         f"`{command} 프로필` : 개인정보 입력/수정\n"
         f"`{command} 설정` : 검색/알림 환경설정"
     )
@@ -583,6 +914,14 @@ def slash_help_text(command):
 def command_matches(text, *keywords):
     normalized = clean_text(text).lower()
     return any(keyword in normalized for keyword in keywords)
+
+
+def extract_job_search_query(text):
+    cleaned = clean_text(text)
+    for keyword in ["공고검색", "공고 검색", "찾기", "find", "search_jobs"]:
+        if cleaned.lower().startswith(keyword.lower()):
+            return clean_text(cleaned[len(keyword):])
+    return ""
 
 
 def build_job_blocks(payload, headline="맞춤 채용공고 추천", next_index=None):
@@ -831,32 +1170,7 @@ def load_recent_open_jobs(limit=10, preferences=None):
         except sqlite3.Error:
             rows = []
 
-    candidates = []
-    for row in rows:
-        deep_data = parse_json_field(row["deep_scraped_json"])
-        extracted = parse_json_field(row["extracted_info_json"])
-        location = deep_data.get("location") or extracted.get("location") or "확인 필요"
-        employment_type = deep_data.get("employment_type") or extracted.get("employment_type") or "확인 필요"
-        candidates.append(
-            {
-                "dispatch_type": "SEARCH",
-                "platform": row["platform"],
-                "company": row["company"],
-                "title": row["title"],
-                "employment_type": employment_type,
-                "location": location,
-                "salary": deep_data.get("salary") or extracted.get("salary") or "확인 필요",
-                "requirements": extracted.get("requirements") or deep_data.get("requirements") or "",
-                "preferences": extracted.get("preferences") or deep_data.get("preferences") or "",
-                "jd_summary": extracted.get("jd_summary") or deep_data.get("jd_summary") or "",
-                "job_keywords": extracted.get("job_keywords") or [],
-                "detail_url": row["detail_url"],
-                "company_career_url": extracted.get("company_career_url") or "",
-                "image_url": row["image_url"],
-                "deadline": row["deadline"],
-                "scraped_at": row["scraped_at"],
-            }
-        )
+    candidates = [job_row_to_candidate(row) for row in rows]
     filtered = filter_candidates_by_preferences(candidates, preferences)
     return filtered[:limit]
 
@@ -927,7 +1241,19 @@ def post_ephemeral(response_url, payload):
 
 def run_pipeline_and_post_table(response_url, user_id):
     try:
-        subprocess.run([sys.executable, "-X", "utf8", str(PIPELINE_SCRIPT)], cwd=str(BASE_DIR), check=False)
+        log_file = DATA_DIR / "pipeline_run.log"
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(f"\n--- Pipeline Run Started at {datetime.now()} ---\n")
+            f.flush()
+            subprocess.run(
+                [sys.executable, "-u", "-X", "utf8", str(PIPELINE_SCRIPT)],
+                cwd=str(BASE_DIR),
+                stdout=f,
+                stderr=subprocess.STDOUT,
+                check=False
+            )
+    except Exception as e:
+        print(f"[ERROR] Failed to run pipeline: {e}")
     finally:
         preferences = get_user_preferences(user_id)
         candidates = load_recent_open_jobs(10, preferences)
@@ -1032,6 +1358,29 @@ async def handle_slack_interactive(payload: str = Form(...)):
         save_user_preferences(user_id, parse_preferences_submission(data))
         return {"response_action": "clear"}
 
+    if interaction_type == "view_submission" and data.get("view", {}).get("callback_id") == "modal_job_search":
+        values = data.get("view", {}).get("state", {}).get("values", {})
+        query = clean_text(values.get("blk_search_query", {}).get("input_search_query", {}).get("value", ""))
+        
+        target_selected = values.get("blk_search_target", {}).get("input_search_target", {}).get("selected_option", {})
+        target = target_selected.get("value", "all") if target_selected else "all"
+        
+        include_closed_selected = values.get("blk_search_include_closed", {}).get("input_search_include_closed", {}).get("selected_options", [])
+        include_closed = any(opt.get("value") == "include_closed" for opt in include_closed_selected)
+        
+        channel_id = data.get("view", {}).get("private_metadata", "") or user_id
+        
+        results = search_jobs_in_db(query, target, include_closed)
+        blocks = build_search_result_blocks(query, target, include_closed, results, 0, channel_id)
+        
+        call_slack_api("chat.postEphemeral", {
+            "channel": channel_id,
+            "user": user_id,
+            "blocks": blocks,
+            "text": "공고 검색 결과"
+        })
+        return {"response_action": "clear"}
+
     actions = data.get("actions", [])
     if not actions:
         return {"ok": True}
@@ -1126,6 +1475,37 @@ async def handle_slack_interactive(payload: str = Form(...)):
                 },
             )
 
+    elif action_id == "btn_search_jobs":
+        channel_id = data.get("channel", {}).get("id") or data.get("container", {}).get("channel_id", "") or user_id
+        ok, message = call_slack_api("views.open", {"trigger_id": trigger_id, "view": build_job_search_modal(channel_id)})
+        if not ok:
+            post_ephemeral(response_url, {"text": f"공고 검색 모달을 열 수 없습니다. ({message})"})
+
+    elif action_id in ("btn_search_page_next", "btn_search_page_prev"):
+        try:
+            btn_val = json.loads(actions[0].get("value", "{}"))
+            query = btn_val.get("q", "")
+            target = btn_val.get("t", "all")
+            include_closed = btn_val.get("ic", False)
+            page = btn_val.get("p", 0)
+            channel_id = btn_val.get("c", "") or user_id
+            
+            results = search_jobs_in_db(query, target, include_closed)
+            blocks = build_search_result_blocks(query, target, include_closed, results, page, channel_id)
+            post_response(response_url, {
+                "replace_original": True,
+                "blocks": blocks,
+                "text": "공고 검색 결과"
+            })
+        except Exception as e:
+            print(f"[ERROR] Failed to handle page navigation: {e}")
+
+    elif action_id == "btn_search_jobs_again":
+        channel_id = actions[0].get("value", "") or user_id
+        ok, message = call_slack_api("views.open", {"trigger_id": trigger_id, "view": build_job_search_modal(channel_id)})
+        if not ok:
+            post_ephemeral(response_url, {"text": f"공고 검색 모달을 열 수 없습니다. ({message})"})
+
     return {"ok": True}
 
 
@@ -1137,6 +1517,7 @@ async def handle_slack_command(
     user_name: str = Form(""),
     trigger_id: str = Form(""),
     response_url: str = Form(""),
+    channel_id: str = Form(""),
 ):
     normalized_text = clean_text(text).lower()
 
@@ -1155,6 +1536,21 @@ async def handle_slack_command(
         return {
             "response_type": "ephemeral",
             "text": f"<@{user_id}>님, 최신 채용공고를 수집하고 분석하는 중입니다. 완료되면 최신순 카드 목록으로 나에게만 표시됩니다.",
+        }
+
+    if command_matches(normalized_text, "공고검색", "찾기", "find", "search_jobs"):
+        search_query = extract_job_search_query(text)
+        if search_query:
+            results = search_jobs_in_db(search_query, "all", False)
+            return {
+                "response_type": "ephemeral",
+                "text": "공고 검색 결과",
+                "blocks": build_search_result_blocks(search_query, "all", False, results, 0, channel_id or user_id),
+            }
+        ok, message = call_slack_api("views.open", {"trigger_id": trigger_id, "view": build_job_search_modal(channel_id or user_id)})
+        return {
+            "response_type": "ephemeral",
+            "text": "공고 검색 모달을 열었습니다." if ok else f"공고 검색 모달을 열 수 없습니다. ({message})",
         }
 
     if command_matches(normalized_text, "검색", "추천", "맞춤", "search", "recommend"):
