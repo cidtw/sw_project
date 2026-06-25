@@ -47,6 +47,15 @@
           "type": "button",
           "text": {
             "type": "plain_text",
+            "text": "📌 공고 스크랩",
+            "emoji": true
+          },
+          "action_id": "btn_scrap_jobs"
+        },
+        {
+          "type": "button",
+          "text": {
+            "type": "plain_text",
             "text": "👤 개인정보 확인/수정",
             "emoji": true
           },

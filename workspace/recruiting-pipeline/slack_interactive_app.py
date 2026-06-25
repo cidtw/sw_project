@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import hashlib
 import json
 import os
 import re
@@ -8,12 +9,13 @@ import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import quote_plus
 
 import requests
 from fastapi import FastAPI, Form
 
 from chatbot_search import hard_match_score, load_candidates, run_search
-from common import BASE_DIR, DATA_DIR, DB_PATH
+from common import BASE_DIR, DATA_DIR, DB_PATH, normalized_job_key
 from scorer import clean_text, normalize_schema_payload
 
 SLACK_API_BASE = "https://slack.com/api"
@@ -28,6 +30,12 @@ CAREER_PERIODS = ["3년 미만", "3년 ~ 5년", "5년 ~ 8년", "8년 ~ 11년", "
 SEARCH_PAGE_SIZE = 10
 MAX_SEARCH_RESULTS = 200
 VALID_SEARCH_TARGETS = {"all", "both", "title", "company"}
+SCRAP_SOURCE_LABELS = {
+    "crawled": "크롤된 공고",
+    "recommended": "맞춤 공고",
+    "search": "검색한 공고",
+}
+SCRAP_SELECTION_LIMIT = 10
 
 app = FastAPI(title="Recruiting Slack Interactive App")
 
@@ -96,6 +104,40 @@ def init_profile_db():
         for column_name, column_type in preference_columns.items():
             if column_name not in existing_columns:
                 conn.execute(f"ALTER TABLE user_preferences ADD COLUMN {column_name} {column_type}")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_job_selection_cache (
+                user_id TEXT,
+                source TEXT,
+                job_key TEXT,
+                rank INTEGER,
+                payload_json TEXT,
+                created_at TEXT,
+                PRIMARY KEY (user_id, source, job_key)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_job_scraps (
+                user_id TEXT,
+                job_key TEXT,
+                source TEXT,
+                platform TEXT,
+                company TEXT,
+                title TEXT,
+                employment_type TEXT,
+                location TEXT,
+                salary TEXT,
+                deadline TEXT,
+                detail_url TEXT,
+                image_url TEXT,
+                payload_json TEXT,
+                created_at TEXT,
+                PRIMARY KEY (user_id, job_key)
+            )
+            """
+        )
         conn.commit()
 
 
@@ -668,6 +710,145 @@ def search_relevance_score(item, terms):
     return score
 
 
+def google_job_search_url(query):
+    text = clean_text(query)
+    google_query = (
+        f"{text} 채용 "
+        "(site:jobkorea.co.kr OR site:saramin.co.kr OR site:incruit.com)"
+    )
+    return f"https://www.google.com/search?q={quote_plus(google_query)}"
+
+
+def job_key_for_payload(payload):
+    detail_url = clean_text(payload.get("detail_url", ""))
+    if detail_url:
+        raw_key = detail_url
+    else:
+        raw_key = normalized_job_key(payload.get("company", ""), payload.get("title", ""))
+    return hashlib.sha1(raw_key.encode("utf-8")).hexdigest()[:24]
+
+
+def normalize_job_for_storage(item, user_id=""):
+    payload = normalize_schema_payload(dict(item), "SEARCH", user_id)
+    payload["platform"] = detect_platform(item)
+    payload["deadline"] = clean_text(item.get("deadline", payload.get("deadline", "")))
+    payload["scraped_at"] = clean_text(item.get("scraped_at", payload.get("scraped_at", "")))
+    return payload
+
+
+def cache_selection_jobs(user_id, source, jobs):
+    init_profile_db()
+    now = now_utc()
+    normalized_jobs = [normalize_job_for_storage(job, user_id) for job in jobs[:SCRAP_SELECTION_LIMIT]]
+    with sqlite3.connect(PROFILE_DB_PATH) as conn:
+        conn.execute("DELETE FROM user_job_selection_cache WHERE user_id = ? AND source = ?", (user_id, source))
+        for rank, payload in enumerate(normalized_jobs, start=1):
+            job_key = job_key_for_payload(payload)
+            payload["_job_key"] = job_key
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO user_job_selection_cache (
+                    user_id, source, job_key, rank, payload_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, source, job_key, rank, json.dumps(payload, ensure_ascii=False), now),
+            )
+        conn.commit()
+    return normalized_jobs
+
+
+def load_selection_cache(user_id, source):
+    init_profile_db()
+    with sqlite3.connect(PROFILE_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT job_key, payload_json
+            FROM user_job_selection_cache
+            WHERE user_id = ? AND source = ?
+            ORDER BY rank ASC
+            """,
+            (user_id, source),
+        ).fetchall()
+    jobs = []
+    for row in rows:
+        payload = parse_json_field(row["payload_json"])
+        if payload:
+            payload["_job_key"] = row["job_key"]
+            jobs.append(payload)
+    return jobs
+
+
+def save_scrap_jobs(user_id, source, job_keys):
+    init_profile_db()
+    selected_keys = set(job_keys)
+    if not selected_keys:
+        return []
+    cached_jobs = load_selection_cache(user_id, source)
+    saved_jobs = []
+    now = now_utc()
+    with sqlite3.connect(PROFILE_DB_PATH) as conn:
+        for payload in cached_jobs:
+            job_key = payload.get("_job_key") or job_key_for_payload(payload)
+            if job_key not in selected_keys:
+                continue
+            payload = dict(payload)
+            payload.pop("_job_key", None)
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO user_job_scraps (
+                    user_id, job_key, source, platform, company, title, employment_type,
+                    location, salary, deadline, detail_url, image_url, payload_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    job_key,
+                    source,
+                    payload.get("platform", ""),
+                    payload.get("company", ""),
+                    payload.get("title", ""),
+                    payload.get("employment_type", ""),
+                    payload.get("location", ""),
+                    payload.get("salary", ""),
+                    payload.get("deadline", ""),
+                    payload.get("detail_url", ""),
+                    payload.get("image_url", ""),
+                    json.dumps(payload, ensure_ascii=False),
+                    now,
+                ),
+            )
+            saved_jobs.append(payload)
+        conn.commit()
+    return saved_jobs
+
+
+def load_scrapped_jobs(user_id, limit=30):
+    init_profile_db()
+    with sqlite3.connect(PROFILE_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT source, payload_json, created_at
+            FROM user_job_scraps
+            WHERE user_id = ?
+            ORDER BY datetime(created_at) DESC
+            LIMIT ?
+            """,
+            (user_id, limit),
+        ).fetchall()
+    jobs = []
+    for row in rows:
+        payload = parse_json_field(row["payload_json"])
+        if payload:
+            payload["_scrap_source"] = row["source"]
+            payload["_scrapped_at"] = row["created_at"]
+            jobs.append(payload)
+    return jobs
+
+
 def search_jobs_in_db(query, target="all", include_closed=False):
     target = target if target in VALID_SEARCH_TARGETS else "all"
     query_terms = tokenize_search_query(query)
@@ -832,12 +1013,224 @@ def build_search_result_blocks(query, target, include_closed, candidates, page, 
         "action_id": "btn_search_jobs_again",
         "value": channel_id
     })
+    action_elements.append({
+        "type": "button",
+        "text": {"type": "plain_text", "text": "Google에서 검색"},
+        "url": google_job_search_url(query),
+        "action_id": "btn_google_job_search",
+    })
     
     blocks.append({
         "type": "actions",
         "elements": action_elements
     })
     
+    return blocks
+
+
+def short_option_text(payload, index):
+    company = clean_text(payload.get("company", "")) or "회사명 확인 필요"
+    title = clean_text(payload.get("title", "")) or "공고명 확인 필요"
+    text = f"{index}. {company} - {title}"
+    return text[:75]
+
+
+def build_scrap_menu_blocks(user_id=""):
+    mention = f"<@{user_id}>님, " if user_id else ""
+    return [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": "공고 스크랩"},
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"{mention}스크랩할 공고 소스를 선택하거나 저장된 스크랩을 확인하세요.",
+            },
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "크롤된 공고 중에서 선택"},
+                    "action_id": "btn_scrap_source_crawled",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "맞춤 공고 중에서 선택"},
+                    "action_id": "btn_scrap_source_recommended",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "검색한 공고 중에서 선택"},
+                    "action_id": "btn_scrap_source_search",
+                },
+            ],
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "style": "primary",
+                    "text": {"type": "plain_text", "text": "스크랩된 공고 보기"},
+                    "action_id": "btn_scrap_view",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "초기 메뉴"},
+                    "action_id": "btn_show_launcher",
+                },
+            ],
+        },
+    ]
+
+
+def build_scrap_select_modal(source, jobs, channel_id=""):
+    source_label = SCRAP_SOURCE_LABELS.get(source, "공고")
+    if not jobs:
+        return {
+            "type": "modal",
+            "callback_id": "modal_scrap_empty",
+            "title": {"type": "plain_text", "text": "공고 스크랩"},
+            "close": {"type": "plain_text", "text": "닫기"},
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*{source_label}* 후보가 없습니다. 먼저 공고를 검색하거나 최신 업데이트를 실행해 주세요.",
+                    },
+                }
+            ],
+        }
+
+    options = [
+        {
+            "text": {"type": "plain_text", "text": short_option_text(payload, index)},
+            "value": payload.get("_job_key") or job_key_for_payload(payload),
+        }
+        for index, payload in enumerate(jobs[:SCRAP_SELECTION_LIMIT], start=1)
+    ]
+    return {
+        "type": "modal",
+        "callback_id": "modal_scrap_select",
+        "title": {"type": "plain_text", "text": "공고 스크랩"},
+        "submit": {"type": "plain_text", "text": "스크랩 저장"},
+        "close": {"type": "plain_text", "text": "취소"},
+        "private_metadata": json.dumps({"source": source, "channel_id": channel_id}, ensure_ascii=False),
+        "blocks": [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"*{source_label}* 중 저장할 공고를 선택하세요."},
+            },
+            {
+                "type": "input",
+                "block_id": "blk_scrap_jobs",
+                "label": {"type": "plain_text", "text": "스크랩할 공고"},
+                "element": {
+                    "type": "checkboxes",
+                    "action_id": "input_scrap_jobs",
+                    "options": options,
+                },
+            },
+        ],
+    }
+
+
+def build_scrap_saved_blocks(saved_jobs):
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": "스크랩 저장 완료"},
+        }
+    ]
+    if not saved_jobs:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "선택된 공고가 없습니다."}})
+    else:
+        for idx, payload in enumerate(saved_jobs[:10], start=1):
+            title_text = payload.get("title", "")
+            if payload.get("detail_url"):
+                title_text = f"<{payload['detail_url']}|{payload.get('title', '공고 보기')}>"
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*{idx}. {payload.get('company', '')}*\n{title_text}\n지역: {payload.get('location', '')} | 마감: {payload.get('deadline', '')}",
+                    },
+                }
+            )
+    blocks.append(
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "스크랩 메뉴로 돌아가기"},
+                    "action_id": "btn_scrap_jobs",
+                },
+                {
+                    "type": "button",
+                    "style": "primary",
+                    "text": {"type": "plain_text", "text": "스크랩된 공고 보기"},
+                    "action_id": "btn_scrap_view",
+                },
+            ],
+        }
+    )
+    return blocks
+
+
+def build_scrapped_jobs_blocks(user_id):
+    jobs = load_scrapped_jobs(user_id)
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": "스크랩된 공고"},
+        },
+        {"type": "divider"},
+    ]
+    if not jobs:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "아직 스크랩한 공고가 없습니다."}})
+    else:
+        for idx, payload in enumerate(jobs[:30], start=1):
+            source = SCRAP_SOURCE_LABELS.get(payload.get("_scrap_source", ""), payload.get("_scrap_source", ""))
+            title_text = payload.get("title", "")
+            if payload.get("detail_url"):
+                title_text = f"<{payload['detail_url']}|{payload.get('title', '공고 보기')}>"
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"*{idx}. {payload.get('company', '')}* · `{source}`\n"
+                            f"{title_text}\n"
+                            f"지역: {payload.get('location', '')} | 마감: {payload.get('deadline', '')}"
+                        ),
+                    },
+                }
+            )
+    blocks.append(
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "스크랩 메뉴로 돌아가기"},
+                    "action_id": "btn_scrap_jobs",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "초기 메뉴"},
+                    "action_id": "btn_show_launcher",
+                },
+            ],
+        }
+    )
     return blocks
 
 
@@ -906,6 +1299,7 @@ def slash_help_text(command):
         f"`{command} 업데이트` : 최신 채용공고 수집\n"
         f"`{command} 검색` : 내 프로필 기준 맞춤 공고 추천\n"
         f"`{command} 공고검색` : 일반 채용공고 키워드 검색\n"
+        f"`{command} 스크랩` : 공고 스크랩 메뉴\n"
         f"`{command} 프로필` : 개인정보 입력/수정\n"
         f"`{command} 설정` : 검색/알림 환경설정"
     )
@@ -1267,6 +1661,25 @@ def run_pipeline_and_post_table(response_url, user_id):
 
 
 def build_custom_job_blocks(user_id, profile, start_index=0):
+    ranked = get_recommended_jobs(user_id, profile, limit=50)
+    if ranked:
+        selected_index = start_index % len(ranked)
+        best = normalize_schema_payload(ranked[selected_index], "SEARCH", user_id)
+        next_index = (selected_index + 1) % len(ranked) if len(ranked) > 1 else None
+        headline = f"AI 맞춤 채용공고 추천 ({selected_index + 1}/{len(ranked)})"
+    else:
+        request = {
+            "slack_user_id": user_id,
+            "query": " ".join(profile_to_search_profile(profile).get("근무희망지역", [])),
+            "profile": profile_to_search_profile(profile),
+        }
+        best = run_search(request)
+        next_index = None
+        headline = "AI 맞춤 채용공고 추천"
+    return build_job_blocks(best, headline, next_index=next_index)
+
+
+def get_recommended_jobs(user_id, profile, limit=10):
     preferences = get_user_preferences(user_id)
     request = {
         "slack_user_id": user_id,
@@ -1274,18 +1687,22 @@ def build_custom_job_blocks(user_id, profile, start_index=0):
         "profile": profile_to_search_profile(profile),
     }
     candidates = filter_candidates_by_preferences(load_candidates(), preferences)
-    if candidates:
-        ranked = sorted(candidates, key=lambda item: hard_match_score(item, request["profile"], request["query"]), reverse=True)
-        selected_index = start_index % len(ranked)
-        best = normalize_schema_payload(ranked[selected_index], "SEARCH", user_id)
-        next_index = (selected_index + 1) % len(ranked) if len(ranked) > 1 else None
-        headline = f"AI 맞춤 채용공고 추천 ({selected_index + 1}/{len(ranked)})"
-    else:
-        ranked = []
-        best = run_search(request)
-        next_index = None
-        headline = "AI 맞춤 채용공고 추천"
-    return build_job_blocks(best, headline, next_index=next_index)
+    if not candidates:
+        return []
+    return sorted(candidates, key=lambda item: hard_match_score(item, request["profile"], request["query"]), reverse=True)[:limit]
+
+
+def get_scrap_source_jobs(user_id, source):
+    if source == "crawled":
+        return cache_selection_jobs(user_id, source, load_recent_open_jobs(SCRAP_SELECTION_LIMIT, get_user_preferences(user_id)))
+    if source == "recommended":
+        profile = get_user_profile(user_id)
+        if not profile:
+            return []
+        return cache_selection_jobs(user_id, source, get_recommended_jobs(user_id, profile, SCRAP_SELECTION_LIMIT))
+    if source == "search":
+        return load_selection_cache(user_id, source)
+    return []
 
 
 def parse_modal_submission(data):
@@ -1371,6 +1788,7 @@ async def handle_slack_interactive(payload: str = Form(...)):
         channel_id = data.get("view", {}).get("private_metadata", "") or user_id
         
         results = search_jobs_in_db(query, target, include_closed)
+        cache_selection_jobs(user_id, "search", results)
         blocks = build_search_result_blocks(query, target, include_closed, results, 0, channel_id)
         
         call_slack_api("chat.postEphemeral", {
@@ -1379,6 +1797,28 @@ async def handle_slack_interactive(payload: str = Form(...)):
             "blocks": blocks,
             "text": "공고 검색 결과"
         })
+        return {"response_action": "clear"}
+
+    if interaction_type == "view_submission" and data.get("view", {}).get("callback_id") == "modal_scrap_select":
+        values = data.get("view", {}).get("state", {}).get("values", {})
+        selected = values.get("blk_scrap_jobs", {}).get("input_scrap_jobs", {}).get("selected_options", [])
+        job_keys = [option.get("value", "") for option in selected if option.get("value")]
+        try:
+            metadata = json.loads(data.get("view", {}).get("private_metadata", "{}"))
+        except json.JSONDecodeError:
+            metadata = {}
+        source = metadata.get("source", "")
+        saved_jobs = save_scrap_jobs(user_id, source, job_keys)
+        channel_id = metadata.get("channel_id") or user_id
+        call_slack_api(
+            "chat.postEphemeral",
+            {
+                "channel": channel_id,
+                "user": user_id,
+                "blocks": build_scrap_saved_blocks(saved_jobs),
+                "text": "스크랩 저장 완료",
+            },
+        )
         return {"response_action": "clear"}
 
     actions = data.get("actions", [])
@@ -1475,6 +1915,48 @@ async def handle_slack_interactive(payload: str = Form(...)):
                 },
             )
 
+    elif action_id in ("btn_scrap_jobs", "btn_scrap_menu"):
+        post_ephemeral(
+            response_url,
+            {
+                "text": "공고 스크랩",
+                "blocks": build_scrap_menu_blocks(user_id),
+            },
+        )
+
+    elif action_id == "btn_show_launcher":
+        post_ephemeral(
+            response_url,
+            {
+                "text": "스마트 AI 맞춤형 채용 비서 서비스",
+                "blocks": build_launcher_blocks(user_id),
+            },
+        )
+
+    elif action_id in ("btn_scrap_source_crawled", "btn_scrap_source_recommended", "btn_scrap_source_search"):
+        source = {
+            "btn_scrap_source_crawled": "crawled",
+            "btn_scrap_source_recommended": "recommended",
+            "btn_scrap_source_search": "search",
+        }[action_id]
+        channel_id = data.get("channel", {}).get("id") or data.get("container", {}).get("channel_id", "") or user_id
+        jobs = get_scrap_source_jobs(user_id, source)
+        ok, message = call_slack_api(
+            "views.open",
+            {"trigger_id": trigger_id, "view": build_scrap_select_modal(source, jobs, channel_id)},
+        )
+        if not ok:
+            post_ephemeral(response_url, {"text": f"스크랩 선택 모달을 열 수 없습니다. ({message})"})
+
+    elif action_id == "btn_scrap_view":
+        post_ephemeral(
+            response_url,
+            {
+                "text": "스크랩된 공고",
+                "blocks": build_scrapped_jobs_blocks(user_id),
+            },
+        )
+
     elif action_id == "btn_search_jobs":
         channel_id = data.get("channel", {}).get("id") or data.get("container", {}).get("channel_id", "") or user_id
         ok, message = call_slack_api("views.open", {"trigger_id": trigger_id, "view": build_job_search_modal(channel_id)})
@@ -1542,6 +2024,7 @@ async def handle_slack_command(
         search_query = extract_job_search_query(text)
         if search_query:
             results = search_jobs_in_db(search_query, "all", False)
+            cache_selection_jobs(user_id, "search", results)
             return {
                 "response_type": "ephemeral",
                 "text": "공고 검색 결과",
@@ -1551,6 +2034,13 @@ async def handle_slack_command(
         return {
             "response_type": "ephemeral",
             "text": "공고 검색 모달을 열었습니다." if ok else f"공고 검색 모달을 열 수 없습니다. ({message})",
+        }
+
+    if command_matches(normalized_text, "스크랩", "scrap", "bookmark"):
+        return {
+            "response_type": "ephemeral",
+            "text": "공고 스크랩",
+            "blocks": build_scrap_menu_blocks(user_id),
         }
 
     if command_matches(normalized_text, "검색", "추천", "맞춤", "search", "recommend"):

@@ -129,6 +129,7 @@ flowchart TD
 /recruit 검색
 /recruit 공고검색
 /recruit 공고검색 AI
+/recruit 스크랩
 /recruit 프로필
 /recruit 설정
 ```
@@ -141,6 +142,11 @@ flowchart TD
 - `btn_search_jobs`: 일반 공고 검색 모달 열기. 기본 검색 범위는 제목, 회사명, 지역, 자격요건, 우대요건, 직무기술서, 키워드를 포함한 전체 텍스트입니다.
 - `btn_search_page_prev` / `btn_search_page_next`: 검색 결과 페이지 이동
 - `btn_search_jobs_again`: 검색 모달 다시 열기
+- `btn_scrap_jobs`: 스크랩 소스 선택 메뉴 열기
+- `btn_scrap_source_crawled`: 최근 크롤링 공고 중 스크랩할 공고 선택
+- `btn_scrap_source_recommended`: 맞춤 추천 공고 중 스크랩할 공고 선택
+- `btn_scrap_source_search`: 최근 검색 결과 중 스크랩할 공고 선택
+- `btn_scrap_view`: 사용자별 스크랩 공고 목록 조회
 - `btn_user_profile`: 개인정보 입력/수정 모달
 - `btn_delete_profile`: 개인정보 삭제 후 완료 모달
 - `btn_search_preferences`: 검색/알림 환경설정 모달
@@ -149,6 +155,8 @@ flowchart TD
 
 - `data/recruitment.db`: 수집 공고와 상세 크롤링 JSON
 - `data/slack_user_profiles.db`: Slack user id별 개인정보와 환경설정
+- `data/slack_user_profiles.db.user_job_scraps`: 사용자별 스크랩 공고
+- `data/slack_user_profiles.db.user_job_selection_cache`: 스크랩 체크박스 후보 캐시
 - `data/pipeline_state.json`: 체크포인트, 중복 처리 key, 마지막 실행 상태
 - `data/final_recruit_dashboard.json`: Slack 검색/추천에 사용하는 최종 검증 결과
 - `_workspace/*.json`: 단계별 중간 산출물
