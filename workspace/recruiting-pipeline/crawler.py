@@ -127,16 +127,45 @@ def extract_text_from_markup(markup):
     return clean_detail_text(soup.get_text("\n", strip=True))
 
 
+def iter_image_candidates(soup):
+    for img in soup.find_all("img"):
+        for attr in ["src", "data-src", "data-original", "data-lazy", "data-url"]:
+            src = img.get(attr)
+            if src:
+                yield src, img
+        srcset = img.get("srcset") or img.get("data-srcset")
+        if srcset:
+            first = srcset.split(",")[0].strip().split(" ")[0]
+            if first:
+                yield first, img
+    for node in soup.select("[style]"):
+        style = node.get("style") or ""
+        for match in re.findall(r"url\((['\"]?)(.*?)\1\)", style, re.IGNORECASE):
+            if match[1]:
+                yield match[1], node
+
+
+def is_probable_job_image(src, node=None):
+    src_lower = str(src or "").lower()
+    if not any(ext in src_lower for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp"]):
+        return False
+    if any(skip in src_lower for skip in ["logo", "icon", "button", "menu", "common", "loading", "share_default"]):
+        return False
+    if node:
+        width = node.get("width") or node.get("data-width")
+        height = node.get("height") or node.get("data-height")
+        try:
+            if width and height and int(re.sub(r"\D", "", str(width)) or 0) < 180 and int(re.sub(r"\D", "", str(height)) or 0) < 120:
+                return False
+        except Exception:
+            pass
+    return True
+
+
 def extract_image_from_markup(markup, base_url):
     soup = BeautifulSoup(markup or "", "html.parser")
-    for img in soup.find_all("img"):
-        src = img.get("src") or img.get("data-src") or img.get("data-original")
-        if not src:
-            continue
-        src_lower = src.lower()
-        if not any(ext in src_lower for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp"]):
-            continue
-        if any(skip in src_lower for skip in ["logo", "icon", "button", "menu", "common", "loading", "share_default", "banner"]):
+    for src, node in iter_image_candidates(soup):
+        if not is_probable_job_image(src, node):
             continue
         return urljoin(base_url, src)
     return ""
@@ -639,21 +668,12 @@ def deep_scrape_detail(url):
             img_tags = soup.find_all('img')
 
         for img in img_tags:
-            src = img.get('src', '') or img.get('data-src', '')
-            if not src:
-                continue
-            src_lower = src.lower()
-            if any(x in src_lower for x in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
-                # Filter logos, icons, buttons, menus, and common sharing default templates
-                if any(x in src_lower for x in ['logo', 'icon', 'button', 'menu', 'common', 'loading', 'share_default', 'banner']):
+            for src, node in iter_image_candidates(BeautifulSoup(str(img), "html.parser")):
+                if not is_probable_job_image(src, node):
                     continue
-                if src.startswith('//'):
-                    scraped_image_url = "https:" + src
-                elif src.startswith('/'):
-                    parsed_url = urlparse(target_url)
-                    scraped_image_url = f"{parsed_url.scheme}://{parsed_url.netloc}" + src
-                else:
-                    scraped_image_url = src
+                scraped_image_url = urljoin(target_url, src)
+                break
+            if scraped_image_url:
                 break
 
     if not scraped_image_url:
@@ -661,7 +681,7 @@ def deep_scrape_detail(url):
         if img_matches:
             for match in img_matches:
                 match_lower = match.lower()
-                if not any(x in match_lower for x in ['logo', 'icon', 'button', 'menu', 'common', 'loading', 'share_default', 'banner']):
+                if not any(x in match_lower for x in ['logo', 'icon', 'button', 'menu', 'common', 'loading', 'share_default']):
                     scraped_image_url = match
                     break
     if not scraped_image_url and rendered_html:

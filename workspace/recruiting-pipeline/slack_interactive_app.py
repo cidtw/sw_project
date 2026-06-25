@@ -16,7 +16,13 @@ from fastapi import FastAPI, Form
 
 from chatbot_search import hard_match_score, load_candidates, run_search, profile_to_search_profile
 from common import BASE_DIR, DATA_DIR, DB_PATH, normalized_job_key
-from scorer import clean_text, normalize_schema_payload
+from scorer import (
+    clean_text,
+    extract_structured_summaries,
+    is_poor_text,
+    normalize_schema_payload,
+    summarize_long_field,
+)
 
 pipeline_lock = threading.Lock()
 
@@ -647,6 +653,8 @@ def job_row_to_candidate(row):
         "image_url": clean_text(row["image_url"]),
         "deadline": clean_text(row["deadline"]),
         "scraped_at": row["scraped_at"],
+        "deep_scraped": deep_data,
+        "extracted_info": extracted,
     }
 
 
@@ -1317,6 +1325,53 @@ def extract_job_search_query(text):
     return ""
 
 
+def ensure_nested_job_context(item):
+    raw = dict(item or {})
+    deep_data = raw.get("deep_scraped") if isinstance(raw.get("deep_scraped"), dict) else {}
+    extracted = raw.get("extracted_info") if isinstance(raw.get("extracted_info"), dict) else {}
+    deep_data = dict(deep_data)
+    extracted = dict(extracted)
+
+    for key in ["employment_type", "location", "salary", "requirements", "preferences", "jd_summary"]:
+        value = raw.get(key)
+        if value and not deep_data.get(key):
+            deep_data[key] = value
+
+    if raw.get("job_keywords") and not extracted.get("job_keywords"):
+        extracted["job_keywords"] = raw.get("job_keywords")
+    if raw.get("company_career_url") and not extracted.get("company_career_url"):
+        extracted["company_career_url"] = raw.get("company_career_url")
+
+    raw["deep_scraped"] = deep_data
+    raw["extracted_info"] = extracted
+    return raw
+
+
+def refine_job_payload_for_slack(item, user_id=""):
+    raw = ensure_nested_job_context(item)
+    fallback_jd = clean_text(raw.get("jd_summary") or raw.get("deep_scraped", {}).get("jd_summary", ""))
+    structured = extract_structured_summaries(raw, fallback_jd)
+    payload = normalize_schema_payload(raw, raw.get("dispatch_type", "SEARCH"), user_id or raw.get("slack_user_id", ""))
+    title = clean_text(payload.get("title") or raw.get("title", ""))
+
+    requirements_source = structured.get("requirements") or raw.get("requirements") or payload.get("requirements", "")
+    preferences_source = structured.get("preferences") or raw.get("preferences") or payload.get("preferences", "")
+    jd_source = structured.get("jd_summary") or raw.get("jd_summary") or payload.get("jd_summary", "")
+
+    requirements = summarize_long_field(requirements_source, "requirements", title)
+    preferences = summarize_long_field(preferences_source, "preferences", title)
+    jd_summary = summarize_long_field(jd_source, "jd_summary", title)
+
+    if requirements and not is_poor_text(requirements):
+        payload["requirements"] = requirements
+    if preferences and not is_poor_text(preferences):
+        payload["preferences"] = preferences
+    if jd_summary and not is_poor_text(jd_summary):
+        payload["jd_summary"] = jd_summary
+
+    return normalize_schema_payload(payload, payload.get("dispatch_type", "SEARCH"), payload.get("slack_user_id", ""))
+
+
 def build_job_blocks(
     payload,
     headline="맞춤 채용공고 추천",
@@ -1325,7 +1380,7 @@ def build_job_blocks(
     user_id="",
     scrap_source="recommended",
 ):
-    payload = normalize_schema_payload(payload, payload.get("dispatch_type", "SEARCH"), payload.get("slack_user_id", ""))
+    payload = refine_job_payload_for_slack(payload, user_id)
     if user_id:
         cached = cache_selection_jobs(user_id, scrap_source, [payload], 1)
         if cached:
@@ -1372,6 +1427,13 @@ def build_job_blocks(
         )
     if user_id:
         action_elements.append(build_single_scrap_button(payload, scrap_source))
+    action_elements.append(
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "초기 메뉴"},
+            "action_id": "btn_show_launcher",
+        }
+    )
     if prev_index is not None:
         action_elements.append(
             {

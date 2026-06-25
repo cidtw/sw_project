@@ -534,7 +534,10 @@ def summarize_jd_text(jd_text, title=""):
 def extract_structured_summaries(item, fallback_jd_summary=""):
     deep_data = item.get("deep_scraped", {}) if isinstance(item.get("deep_scraped", {}), dict) else {}
     title = clean_job_title(item.get("title", ""))
-    raw_jd = sanitize_jd_text(deep_data.get("jd_summary", ""))
+    raw_jd = sanitize_jd_text(" ".join([
+        str(deep_data.get("jd_summary", "") or ""),
+        str(deep_data.get("ocr_text", "") or ""),
+    ]))
     crawled_responsibilities = clean_text(deep_data.get("responsibilities", ""))
     crawled_requirements = clean_text(deep_data.get("requirements", ""))
     crawled_preferences = clean_text(deep_data.get("preferences", ""))

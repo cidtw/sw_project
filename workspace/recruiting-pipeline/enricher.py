@@ -106,12 +106,18 @@ def enrich_company_info(company_name):
 
 def extract_jd_from_image(image_url):
     """
-    통이미지 채용공고 URL을 받아 GPT-4o Vision으로 주요 업무 및 복리후생을 JSON으로 추출
+    통이미지 채용공고 URL을 받아 Vision OCR로 JD, 자격요건, 우대요건을 JSON으로 추출
     """
     print(f"📸 통이미지 공고 감지 -> Vision OCR 분석 시작 (URL: {image_url})")
     if not client:
         print("⚠️ OpenAI client not initialized (missing API key). Using fallback mock vision data.")
-        return {"jd_summary": "공고 상세 직무 내용을 참조하십시오. (Vision 분석 생략 - API 키 누락)", "welfare_tags": ["주5일제", "4대보험", "자녀학자금"]}
+        return {
+            "jd_summary": "",
+            "requirements": "",
+            "preferences": "",
+            "ocr_text": "",
+            "welfare_tags": ["정보없음"],
+        }
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -122,7 +128,17 @@ def extract_jd_from_image(image_url):
                     "content": [
                         {
                             "type": "text", 
-                            "text": "제공된 채용 공고 이미지 파일에서 주요 업무 요약(jd_summary)과 복리후생 항목(welfare_tags, 문자열 리스트 형식)을 추출해서 JSON으로 반환해줘. 구조 예시: {\"jd_summary\": \"...\", \"welfare_tags\": [\"...\", \"...\"]}"
+                            "text": (
+                                "제공된 채용 공고 이미지를 OCR로 읽고 채용공고 핵심 정보를 JSON으로 반환해줘. "
+                                "원문을 그대로 길게 복사하지 말고 각 필드는 한국어 한 문장 요약으로 작성해. "
+                                "자격요건과 우대요건이 이미지 안에 명시되어 있으면 반드시 분리해 추출하고, 없으면 빈 문자열로 둬. "
+                                "JSON schema: "
+                                "{\"jd_summary\":\"주요 업무/직무기술서 한 문장\","
+                                "\"requirements\":\"자격요건 한 문장\","
+                                "\"preferences\":\"우대요건 한 문장\","
+                                "\"ocr_text\":\"OCR로 읽은 핵심 원문 발췌\","
+                                "\"welfare_tags\":[\"복리후생 키워드\"]}"
+                            )
                         },
                         {
                             "type": "image_url",
@@ -140,7 +156,13 @@ def extract_jd_from_image(image_url):
         return result
     except Exception as e:
         print(f"❌ Vision API 또는 파싱 실패: {e}", file=sys.stderr)
-        return {"jd_summary": "공고 상세 직무 내용을 참조하십시오. (Vision 분석 실패)", "welfare_tags": ["정보없음"]}
+        return {
+            "jd_summary": "",
+            "requirements": "",
+            "preferences": "",
+            "ocr_text": "",
+            "welfare_tags": ["정보없음"],
+        }
 
 def main():
     print("Starting Corporate Data Enrichment Phase...")
@@ -165,18 +187,29 @@ def main():
             item["deep_scraped"] = {}
             
         jd_summary = item["deep_scraped"].get("jd_summary", "")
+        requirements = item["deep_scraped"].get("requirements", "")
+        preferences = item["deep_scraped"].get("preferences", "")
         image_url = item.get("image_url", "")  # crawler가 채워준 이미지 원본 주소
         
         # [조건 최적화] 텍스트가 부실하거나 비어있거나 '참조' 문구가 포함된 경우 판별
         is_text_poor = not jd_summary or "참조" in str(jd_summary) or len(str(jd_summary)) < 30
+        is_structured_poor = not str(requirements or "").strip() and not str(preferences or "").strip()
         
-        if is_text_poor and image_url:
+        if image_url and (is_text_poor or is_structured_poor):
             print(f"🚨 [조건 충족] 부실 텍스트 감지되어 GPT-4o Vision을 강제 호출합니다!")
             vision_data = extract_jd_from_image(image_url)
-            item["deep_scraped"]["jd_summary"] = vision_data.get("jd_summary", "공고 참조")
+            for field in ["jd_summary", "requirements", "preferences"]:
+                value = str(vision_data.get(field, "") or "").strip()
+                if value:
+                    item["deep_scraped"][field] = value
+            ocr_text = str(vision_data.get("ocr_text", "") or "").strip()
+            if ocr_text:
+                item["deep_scraped"]["ocr_text"] = ocr_text
+                if not item["deep_scraped"].get("jd_summary"):
+                    item["deep_scraped"]["jd_summary"] = ocr_text
             item["deep_scraped"]["welfare_tags"] = vision_data.get("welfare_tags", ["정보없음"])
         else:
-            print(f"⏩ Vision OCR 스킵 조건: PoorText={is_text_poor}, HasImage={bool(image_url)}")
+            print(f"⏩ Vision OCR 스킵 조건: PoorText={is_text_poor}, StructuredPoor={is_structured_poor}, HasImage={bool(image_url)}")
         
         enriched_results.append(item)
         
