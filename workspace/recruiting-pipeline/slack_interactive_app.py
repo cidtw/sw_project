@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import hashlib
+import html
 import json
 import os
 import re
@@ -12,7 +13,8 @@ from pathlib import Path
 from urllib.parse import quote_plus
 
 import requests
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Form, Query
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from chatbot_search import hard_match_score, load_candidates, run_search, profile_to_search_profile
 from common import BASE_DIR, DATA_DIR, DB_PATH, normalized_job_key
@@ -147,7 +149,63 @@ def init_profile_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS workspaces (
+                team_id TEXT PRIMARY KEY,
+                team_name TEXT,
+                bot_token TEXT,
+                bot_user_id TEXT,
+                installed_at TEXT
+            )
+            """
+        )
         conn.commit()
+
+
+def get_workspace_token(team_id):
+    if not team_id:
+        return None
+    init_profile_db()
+    try:
+        with sqlite3.connect(PROFILE_DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT bot_token FROM workspaces WHERE team_id = ?", (team_id,)).fetchone()
+            if row:
+                return row["bot_token"]
+    except Exception as e:
+        print(f"[ERROR] Failed to query workspace token for team {team_id}: {e}")
+    return None
+
+
+def save_workspace_token(team_id, team_name, bot_token, bot_user_id):
+    init_profile_db()
+    try:
+        with sqlite3.connect(PROFILE_DB_PATH) as conn:
+            conn.execute(
+                """
+                INSERT INTO workspaces (team_id, team_name, bot_token, bot_user_id, installed_at)
+                VALUES (:team_id, :team_name, :bot_token, :bot_user_id, :installed_at)
+                ON CONFLICT(team_id) DO UPDATE SET
+                    team_name = excluded.team_name,
+                    bot_token = excluded.bot_token,
+                    bot_user_id = excluded.bot_user_id,
+                    installed_at = excluded.installed_at
+                """,
+                {
+                    "team_id": team_id,
+                    "team_name": team_name,
+                    "bot_token": bot_token,
+                    "bot_user_id": bot_user_id,
+                    "installed_at": now_utc(),
+                }
+            )
+            conn.commit()
+            print(f"[OAUTH] Successfully saved token for team {team_name} ({team_id})")
+            return True
+    except Exception as e:
+        print(f"[OAUTH] Failed to save workspace token: {e}")
+        return False
 
 
 def get_user_profile(user_id):
@@ -1241,15 +1299,19 @@ def build_scrapped_jobs_blocks(user_id):
     return blocks
 
 
-def call_slack_api(method, payload):
-    if not SLACK_BOT_TOKEN:
-        return False, "SLACK_BOT_TOKEN is not set"
+def call_slack_api(method, payload, team_id=None):
+    token = get_workspace_token(team_id) if team_id else None
+    if not token:
+        token = SLACK_BOT_TOKEN
+
+    if not token:
+        return False, "SLACK_BOT_TOKEN is not set and no workspace token found"
 
     try:
         response = requests.post(
             f"{SLACK_API_BASE}/{method}",
             headers={
-                "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
+                "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json; charset=utf-8",
             },
             json=payload,
@@ -1264,16 +1326,16 @@ def call_slack_api(method, payload):
         return False, str(e)
 
 
-def open_slack_modal(trigger_id, existing_data=None):
-    return call_slack_api("views.open", {"trigger_id": trigger_id, "view": build_user_profile_modal(existing_data)})
+def open_slack_modal(trigger_id, existing_data=None, team_id=None):
+    return call_slack_api("views.open", {"trigger_id": trigger_id, "view": build_user_profile_modal(existing_data)}, team_id=team_id)
 
 
-def open_search_preferences_modal(trigger_id, existing_data=None):
-    return call_slack_api("views.open", {"trigger_id": trigger_id, "view": build_search_preferences_modal(existing_data)})
+def open_search_preferences_modal(trigger_id, existing_data=None, team_id=None):
+    return call_slack_api("views.open", {"trigger_id": trigger_id, "view": build_search_preferences_modal(existing_data)}, team_id=team_id)
 
 
-def update_slack_modal(view_id, view):
-    return call_slack_api("views.update", {"view_id": view_id, "view": view})
+def update_slack_modal(view_id, view, team_id=None):
+    return call_slack_api("views.update", {"view_id": view_id, "view": view}, team_id=team_id)
 
 
 def post_response(response_url, payload):
@@ -1931,6 +1993,7 @@ async def handle_slack_interactive(payload: str = Form(...)):
     data = json.loads(payload)
     interaction_type = data.get("type", "")
     user_id = data.get("user", {}).get("id", "")
+    team_id = data.get("team", {}).get("id", "")
 
     if interaction_type == "view_submission" and data.get("view", {}).get("callback_id") == "modal_user_profile":
         save_user_profile(user_id, parse_modal_submission(data))
@@ -1961,7 +2024,7 @@ async def handle_slack_interactive(payload: str = Form(...)):
             "user": user_id,
             "blocks": blocks,
             "text": "공고 검색 결과"
-        })
+        }, team_id=team_id)
         return {"response_action": "clear"}
 
     if interaction_type == "view_submission" and data.get("view", {}).get("callback_id") == "modal_scrap_select":
@@ -1983,6 +2046,7 @@ async def handle_slack_interactive(payload: str = Form(...)):
                 "blocks": build_scrap_saved_blocks(saved_jobs),
                 "text": "스크랩 저장 완료",
             },
+            team_id=team_id
         )
         return {"response_action": "clear"}
 
@@ -2009,7 +2073,7 @@ async def handle_slack_interactive(payload: str = Form(...)):
     elif action_id == "btn_custom_search":
         user_profile = get_user_profile(user_id)
         if not user_profile:
-            ok, message = open_slack_modal(trigger_id)
+            ok, message = open_slack_modal(trigger_id, team_id=team_id)
             if not ok:
                 post_response(
                     response_url,
@@ -2030,7 +2094,7 @@ async def handle_slack_interactive(payload: str = Form(...)):
     elif action_id in ("btn_next_recommendation", "btn_prev_recommendation"):
         user_profile = get_user_profile(user_id)
         if not user_profile:
-            ok, message = open_slack_modal(trigger_id)
+            ok, message = open_slack_modal(trigger_id, team_id=team_id)
             if not ok:
                 post_ephemeral(response_url, {"text": f"개인정보 입력 모달을 열 수 없습니다. ({message})"})
         else:
@@ -2049,7 +2113,7 @@ async def handle_slack_interactive(payload: str = Form(...)):
 
     elif action_id == "btn_user_profile":
         user_profile = get_user_profile(user_id) or {}
-        ok, message = open_slack_modal(trigger_id, user_profile)
+        ok, message = open_slack_modal(trigger_id, user_profile, team_id=team_id)
         if not ok:
             post_response(
                 response_url,
@@ -2063,14 +2127,14 @@ async def handle_slack_interactive(payload: str = Form(...)):
         delete_user_profile(user_id)
         view_id = data.get("view", {}).get("id", "")
         if view_id:
-            ok, message = update_slack_modal(view_id, build_profile_deleted_modal())
+            ok, message = update_slack_modal(view_id, build_profile_deleted_modal(), team_id=team_id)
             if not ok:
                 post_ephemeral(response_url, {"text": f"개인정보는 삭제되었지만 모달 화면 갱신에 실패했습니다. ({message})"})
         elif response_url:
             post_ephemeral(response_url, {"text": "저장된 개인정보가 삭제되었습니다."})
 
     elif action_id == "btn_search_preferences":
-        ok, message = open_search_preferences_modal(trigger_id, get_user_preferences(user_id))
+        ok, message = open_search_preferences_modal(trigger_id, get_user_preferences(user_id), team_id=team_id)
         if not ok:
             post_ephemeral(
                 response_url,
@@ -2137,6 +2201,7 @@ async def handle_slack_interactive(payload: str = Form(...)):
         ok, message = call_slack_api(
             "views.open",
             {"trigger_id": trigger_id, "view": build_scrap_select_modal(source, jobs, channel_id)},
+            team_id=team_id
         )
         if not ok:
             post_ephemeral(response_url, {"text": f"스크랩 선택 모달을 열 수 없습니다. ({message})"})
@@ -2153,7 +2218,7 @@ async def handle_slack_interactive(payload: str = Form(...)):
 
     elif action_id == "btn_search_jobs":
         channel_id = data.get("channel", {}).get("id") or data.get("container", {}).get("channel_id", "") or user_id
-        ok, message = call_slack_api("views.open", {"trigger_id": trigger_id, "view": build_job_search_modal(channel_id)})
+        ok, message = call_slack_api("views.open", {"trigger_id": trigger_id, "view": build_job_search_modal(channel_id)}, team_id=team_id)
         if not ok:
             post_ephemeral(response_url, {"text": f"공고 검색 모달을 열 수 없습니다. ({message})"})
 
@@ -2178,7 +2243,7 @@ async def handle_slack_interactive(payload: str = Form(...)):
 
     elif action_id == "btn_search_jobs_again":
         channel_id = actions[0].get("value", "") or user_id
-        ok, message = call_slack_api("views.open", {"trigger_id": trigger_id, "view": build_job_search_modal(channel_id)})
+        ok, message = call_slack_api("views.open", {"trigger_id": trigger_id, "view": build_job_search_modal(channel_id)}, team_id=team_id)
         if not ok:
             post_ephemeral(response_url, {"text": f"공고 검색 모달을 열 수 없습니다. ({message})"})
 
@@ -2194,6 +2259,7 @@ async def handle_slack_command(
     trigger_id: str = Form(""),
     response_url: str = Form(""),
     channel_id: str = Form(""),
+    team_id: str = Form(""),
 ):
     normalized_text = clean_text(text).lower()
 
@@ -2224,7 +2290,7 @@ async def handle_slack_command(
                 "text": "공고 검색 결과",
                 "blocks": build_search_result_blocks(search_query, "all", False, results, 0, channel_id or user_id),
             }
-        ok, message = call_slack_api("views.open", {"trigger_id": trigger_id, "view": build_job_search_modal(channel_id or user_id)})
+        ok, message = call_slack_api("views.open", {"trigger_id": trigger_id, "view": build_job_search_modal(channel_id or user_id)}, team_id=team_id)
         return {
             "response_type": "ephemeral",
             "text": "공고 검색 모달을 열었습니다." if ok else f"공고 검색 모달을 열 수 없습니다. ({message})",
@@ -2240,7 +2306,7 @@ async def handle_slack_command(
     if command_matches(normalized_text, "검색", "추천", "맞춤", "search", "recommend"):
         user_profile = get_user_profile(user_id)
         if not user_profile:
-            ok, message = open_slack_modal(trigger_id)
+            ok, message = open_slack_modal(trigger_id, team_id=team_id)
             if ok:
                 return {
                     "response_type": "ephemeral",
@@ -2257,14 +2323,14 @@ async def handle_slack_command(
         }
 
     if command_matches(normalized_text, "프로필", "개인정보", "profile"):
-        ok, message = open_slack_modal(trigger_id, get_user_profile(user_id) or {})
+        ok, message = open_slack_modal(trigger_id, get_user_profile(user_id) or {}, team_id=team_id)
         return {
             "response_type": "ephemeral",
             "text": "개인정보 설정 모달을 열었습니다." if ok else f"개인정보 설정 모달을 열 수 없습니다. ({message})",
         }
 
     if command_matches(normalized_text, "설정", "환경", "알림", "필터", "preference", "setting"):
-        ok, message = open_search_preferences_modal(trigger_id, get_user_preferences(user_id))
+        ok, message = open_search_preferences_modal(trigger_id, get_user_preferences(user_id), team_id=team_id)
         return {
             "response_type": "ephemeral",
             "text": "검색 환경설정 모달을 열었습니다." if ok else f"환경설정 모달을 열 수 없습니다. ({message})",
@@ -2290,6 +2356,136 @@ async def slack_launcher_blocks():
 @app.get("/health")
 async def health():
     return {"ok": True, "profile_db": str(PROFILE_DB_PATH)}
+
+
+@app.get("/slack/install")
+async def slack_install():
+    client_id = os.environ.get("SLACK_CLIENT_ID", "")
+    if not client_id:
+        return {"error": "SLACK_CLIENT_ID not configured on server"}
+    scopes = "commands,chat:write"
+    oauth_url = f"https://slack.com/oauth/v2/authorize?client_id={client_id}&scope={scopes}"
+    return RedirectResponse(oauth_url)
+
+
+@app.get("/slack/oauth_redirect")
+async def slack_oauth_redirect(code: str = None, error: str = None):
+    if error:
+        return HTMLResponse(content=f"<h3>Installation Error</h3><p>{html.escape(error)}</p>", status_code=400)
+    if not code:
+        return HTMLResponse(content="<h3>Installation Error</h3><p>Missing authorization code.</p>", status_code=400)
+
+    client_id = os.environ.get("SLACK_CLIENT_ID", "")
+    client_secret = os.environ.get("SLACK_CLIENT_SECRET", "")
+    if not client_id or not client_secret:
+        return HTMLResponse(content="<h3>Configuration Error</h3><p>SLACK_CLIENT_ID or SLACK_CLIENT_SECRET not configured on server.</p>", status_code=500)
+
+    try:
+        res = requests.post(
+            "https://slack.com/api/oauth.v2.access",
+            data={
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "code": code
+            },
+            timeout=15
+        )
+        body = res.json()
+        if not body.get("ok"):
+            err_msg = body.get("error", "unknown error")
+            return HTMLResponse(content=f"<h3>Authentication Failed</h3><p>{html.escape(err_msg)}</p>", status_code=400)
+
+        team_id = body.get("team", {}).get("id", "")
+        team_name = body.get("team", {}).get("name", "Unknown Team")
+        bot_token = body.get("access_token", "")
+        bot_user_id = body.get("bot_user_id", "")
+
+        if not team_id or not bot_token:
+            return HTMLResponse(content="<h3>Error</h3><p>OAuth succeeded but team_id or access_token was missing in the response.</p>", status_code=400)
+
+        if save_workspace_token(team_id, team_name, bot_token, bot_user_id):
+            return HTMLResponse(
+                content=f"""
+                <html>
+                <head>
+                    <title>설정 완료!</title>
+                    <link rel="preconnect" href="https://fonts.googleapis.com">
+                    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+                    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
+                    <style>
+                        body {{
+                            background: linear-gradient(135deg, #0F172A 0%, #1E1B4B 100%);
+                            color: #F8FAFC;
+                            font-family: 'Outfit', sans-serif;
+                            display: flex;
+                            align-items: center;
+                            justify-content: center;
+                            height: 100vh;
+                            margin: 0;
+                        }}
+                        .card {{
+                            background: rgba(255, 255, 255, 0.05);
+                            backdrop-filter: blur(10px);
+                            border: 1px solid rgba(255, 255, 255, 0.1);
+                            padding: 3rem;
+                            border-radius: 24px;
+                            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+                            text-align: center;
+                            max-width: 480px;
+                            animation: fadeIn 0.8s ease-out;
+                        }}
+                        h1 {{
+                            background: linear-gradient(to right, #818CF8, #C084FC);
+                            -webkit-background-clip: text;
+                            -webkit-text-fill-color: transparent;
+                            font-size: 2.5rem;
+                            font-weight: 800;
+                            margin-top: 0;
+                        }}
+                        p {{
+                            color: #94A3B8;
+                            font-size: 1.1rem;
+                            line-height: 1.6;
+                        }}
+                        .badge {{
+                            background: rgba(129, 140, 248, 0.15);
+                            color: #A5B4FC;
+                            padding: 0.5rem 1rem;
+                            border-radius: 9999px;
+                            font-size: 0.9rem;
+                            display: inline-block;
+                            margin: 1rem 0;
+                            font-weight: 600;
+                            border: 1px solid rgba(129, 140, 248, 0.2);
+                        }}
+                        .footer {{
+                            margin-top: 2rem;
+                            color: #64748B;
+                            font-size: 0.85rem;
+                        }}
+                        @keyframes fadeIn {{
+                            from {{ opacity: 0; transform: translateY(20px); }}
+                            to {{ opacity: 1; transform: translateY(0); }}
+                        }}
+                    </style>
+                </head>
+                <body>
+                    <div class="card">
+                        <h1>연동 성공! 🎉</h1>
+                        <p><strong>{html.escape(team_name)}</strong> 워크스페이스에 스마트 AI 채용 비서 서비스가 안전하게 연동되었습니다.</p>
+                        <div class="badge">팀 ID: {html.escape(team_id)}</div>
+                        <p>이제 Slack에서 <code>/recruit</code> 명령어를 사용하여 AI 맞춤 추천 서비스를 바로 시작하세요.</p>
+                        <div class="footer">본 창을 닫으셔도 좋습니다.</div>
+                    </div>
+                </body>
+                </html>
+                """,
+                status_code=200
+            )
+        else:
+            return HTMLResponse(content="<h3>Error</h3><p>OAuth succeeded but failed to save workspace credentials to database.</p>", status_code=500)
+    except Exception as e:
+        return HTMLResponse(content=f"<h3>Exception</h3><p>{html.escape(str(e))}</p>", status_code=500)
 
 
 if __name__ == "__main__":

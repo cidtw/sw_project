@@ -23,10 +23,13 @@ def load_secrets():
         with open(SECRETS_FILE, "w", encoding="utf-8") as f:
             f.write("# Slack Bot configuration\n")
             f.write("SLACK_BOT_TOKEN=your-slack-bot-token-here\n")
+            f.write("# Slack OAuth Configuration (Required for Multi-Workspace distribution)\n")
+            f.write("SLACK_CLIENT_ID=your-slack-client-id-here\n")
+            f.write("SLACK_CLIENT_SECRET=your-slack-client-secret-here\n")
             f.write("# Optional: OpenAI API configuration for enricher\n")
             f.write("OPENAI_API_KEY=your-openai-key-here\n")
         print(f"[*] Created credentials template file: {SECRETS_FILE}")
-        print("[!] Please open it and paste your actual SLACK_BOT_TOKEN.")
+        print("[!] Please open it and paste your actual tokens/keys.")
         return False
 
     with open(SECRETS_FILE, "r", encoding="utf-8") as f:
@@ -40,7 +43,11 @@ def load_secrets():
                 val = val.strip()
                 # Do not overwrite with placeholder if already defined in env
                 existing_val = os.environ.get(key, "").strip()
-                if not existing_val or "your-slack-bot-token-here" in existing_val or "your-openai-key-here" in existing_val:
+                if (not existing_val or 
+                    "your-slack-bot-token-here" in existing_val or 
+                    "your-openai-key-here" in existing_val or
+                    "your-slack-client-id-here" in existing_val or
+                    "your-slack-client-secret-here" in existing_val):
                     os.environ[key] = val
     return True
 
