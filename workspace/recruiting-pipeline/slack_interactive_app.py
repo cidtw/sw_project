@@ -568,6 +568,12 @@ def build_search_preferences_modal(existing_data=None):
 
 
 def build_job_search_modal(channel_id, initial_query=""):
+    search_target_options = [
+        plain_option("전체 텍스트", "all"),
+        plain_option("제목 + 회사명", "both"),
+        plain_option("공고 제목만", "title"),
+        plain_option("회사명만", "company"),
+    ]
     query_element = {
         "type": "plain_text_input",
         "action_id": "input_search_query",
@@ -594,17 +600,9 @@ def build_job_search_modal(channel_id, initial_query=""):
             "element": {
                 "type": "radio_buttons",
                 "action_id": "input_search_target",
-                "initial_option": {
-                    "text": {"type": "plain_text", "text": "전체 텍스트"},
-                    "value": "all"
-                },
-                "options": [
-                    {"text": {"type": "plain_text", "text": "전체 텍스트"}, "value": "all"},
-                    {"text": {"type": "plain_text", "text": "제목 + 회사명"}, "value": "both"},
-                    {"text": {"type": "plain_text", "text": "공고 제목만"}, "value": "title"},
-                    {"text": {"type": "plain_text", "text": "회사명만"}, "value": "company"}
-                ]
-            }
+                "initial_option": search_target_options[0],
+                "options": search_target_options,
+            },
         },
         {
             "type": "input",
@@ -615,13 +613,10 @@ def build_job_search_modal(channel_id, initial_query=""):
                 "type": "checkboxes",
                 "action_id": "input_search_include_closed",
                 "options": [
-                    {
-                        "text": {"type": "plain_text", "text": "마감된 공고도 포함하여 검색"},
-                        "value": "include_closed"
-                    }
-                ]
-            }
-        }
+                    plain_option("마감된 공고도 포함하여 검색", "include_closed"),
+                ],
+            },
+        },
     ]
     return {
         "type": "modal",
@@ -630,7 +625,7 @@ def build_job_search_modal(channel_id, initial_query=""):
         "submit": {"type": "plain_text", "text": "검색하기"},
         "close": {"type": "plain_text", "text": "취소"},
         "private_metadata": channel_id,
-        "blocks": blocks
+        "blocks": blocks,
     }
 
 
