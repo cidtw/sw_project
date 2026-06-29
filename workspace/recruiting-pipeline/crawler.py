@@ -374,7 +374,7 @@ def parse_clean_deadline(deadline_str):
 
 def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15.0)
     cursor = conn.cursor()
 
     cursor.execute("PRAGMA table_info(jobs)")
@@ -407,7 +407,7 @@ def init_db():
     conn.close()
 
 def insert_jobs(jobs):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15.0)
     cursor = conn.cursor()
     new_count = 0
     for job in jobs:
@@ -440,7 +440,7 @@ def insert_jobs(jobs):
     print(f"Inserted {new_count} new unique jobs into DB.")
 
 def get_unsent_jobs():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15.0)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("SELECT platform, company, title, detail_url, deadline, image_url, deep_scraped_json, extracted_info_json FROM jobs WHERE sent_status = 0")

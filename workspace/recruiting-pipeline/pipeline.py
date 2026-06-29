@@ -8,10 +8,13 @@ from common import (
     BASE_DIR,
     DB_PATH,
     FETCH_OUTPUT_PATH,
+    ENRICH_OUTPUT_PATH,
+    SCORE_OUTPUT_PATH,
     FINAL_DASHBOARD_PATH,
     STATE_FILE,
     USER_PROFILE_PATH,
     VERIFY_OUTPUT_PATH,
+    VERIFY_ERRORS_PATH,
     calculate_file_hash,
     normalized_job_key,
     read_json,
@@ -42,7 +45,7 @@ def update_sent_status_in_db(detail_url):
     if not DB_PATH.exists():
         return
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=15.0)
         cursor = conn.cursor()
         cursor.execute("UPDATE jobs SET sent_status = 1 WHERE detail_url = ?", (detail_url,))
         conn.commit()
@@ -79,6 +82,8 @@ def finalize_processed_jobs(state):
 def main():
     state = load_state()
     start_phase = state.get("current_phase", "")
+    if start_phase == "ERROR" or not start_phase:
+        start_phase = "FETCH"
     
     # Check user profile change
     current_hash = calculate_file_hash(USER_PROFILE_PATH)
@@ -88,11 +93,38 @@ def main():
         print(f"🔄 User profile change detected! Old hash: {old_hash}, New hash: {current_hash}")
         state["user_profile_hash"] = current_hash
         if start_phase in ["IDLE", "VERIFY", "DISPATCH", ""]:
-            print("Resetting phase to SCORE to recalculate matching with new profile.")
-            start_phase = "SCORE"
-            state["current_phase"] = "SCORE"
+            if ENRICH_OUTPUT_PATH.exists():
+                print("Resetting phase to SCORE to recalculate matching with new profile.")
+                start_phase = "SCORE"
+                state["current_phase"] = "SCORE"
+            else:
+                print("Enrich output file not found. Starting from FETCH phase to gather data.")
+                start_phase = "FETCH"
+                state["current_phase"] = "FETCH"
         save_state(state)
         
+    # Validate phase files availability before execution
+    if start_phase == "ENRICH" and not FETCH_OUTPUT_PATH.exists():
+        print("Fetch output not found. Falling back to FETCH.")
+        start_phase = "FETCH"
+    elif start_phase == "SCORE" and not ENRICH_OUTPUT_PATH.exists():
+        print("Enrich output not found. Falling back to FETCH.")
+        start_phase = "FETCH"
+    elif start_phase == "VERIFY" and not SCORE_OUTPUT_PATH.exists():
+        if ENRICH_OUTPUT_PATH.exists():
+            print("Score output not found. Falling back to SCORE.")
+            start_phase = "SCORE"
+        else:
+            print("Enrich output not found. Falling back to FETCH.")
+            start_phase = "FETCH"
+    elif start_phase == "DISPATCH" and not VERIFY_OUTPUT_PATH.exists():
+        if SCORE_OUTPUT_PATH.exists():
+            print("Verify output not found. Falling back to VERIFY.")
+            start_phase = "VERIFY"
+        else:
+            print("Score output not found. Falling back to FETCH.")
+            start_phase = "FETCH"
+
     print(f"Starting Recruiting Pipeline. Resuming from phase: {start_phase or 'START'}")
     
     # Phase 1: FETCH
@@ -150,6 +182,10 @@ def main():
         state["current_phase"] = "VERIFY"
         save_state(state)
         
+        # Clean up any stale verify errors before validation starts
+        if VERIFY_ERRORS_PATH.exists():
+            VERIFY_ERRORS_PATH.unlink(missing_ok=True)
+        
         # Verification & Self-Correction Loop
         retry_count = 0
         max_retries = 3
@@ -159,10 +195,13 @@ def main():
             print(f"\n--- Verifying Scored Data (QA Checks) - Attempt {retry_count + 1} ---")
             
             # Run standalone verifier
-            res = subprocess.run([sys.executable, "-X", "utf8", "verifier.py"], capture_output=False)
+            verifier_path = BASE_DIR / "verifier.py"
+            res = subprocess.run([sys.executable, "-X", "utf8", str(verifier_path)], cwd=str(BASE_DIR), capture_output=False)
             
             if res.returncode == 0:
                 verify_passed = True
+                if VERIFY_ERRORS_PATH.exists():
+                    VERIFY_ERRORS_PATH.unlink(missing_ok=True)
                 print("Verification passed! Rule 4-1 and Rule 4-2 satisfied.")
             else:
                 print(f"Verification failed on attempt {retry_count + 1} with exit code: {res.returncode}")
@@ -171,6 +210,8 @@ def main():
                     print("Initiating Self-Correction... Re-running Scorer Phase 3.")
                     run_script("scorer.py")
                 else:
+                    if VERIFY_ERRORS_PATH.exists():
+                        VERIFY_ERRORS_PATH.unlink(missing_ok=True)
                     print("Max retries exceeded. Transitioning to ERROR state.", file=sys.stderr)
                     state["current_phase"] = "ERROR"
                     save_state(state)

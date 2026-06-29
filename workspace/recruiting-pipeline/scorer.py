@@ -8,6 +8,7 @@ from common import (
     ENRICH_OUTPUT_PATH,
     SCORE_OUTPUT_PATH,
     USER_PROFILE_PATH,
+    VERIFY_ERRORS_PATH,
     dedupe_preserve_order,
     init_openai_client,
     read_json,
@@ -738,7 +739,7 @@ def normalize_refined_data(item, profile, candidate, fallback_jd_summary):
     payload.update(build_architecture_fields(item, payload, location_matched))
     return normalize_schema_payload(payload, "PUSH", payload.get("slack_user_id", ""))
 
-def analyze_job_with_llm(item, profile):
+def analyze_job_with_llm(item, profile, idx=None):
     company = item.get("company", "")
     title = clean_job_title(item.get("title", ""))
     image_url = sanitize_image_url(item.get("image_url", ""))
@@ -762,10 +763,17 @@ def analyze_job_with_llm(item, profile):
     if not client:
         return normalize_refined_data(item, profile, {}, fallback_jd_summary)
         
+    errors_context = ""
+    if idx is not None and VERIFY_ERRORS_PATH.exists():
+        all_errors = read_json(VERIFY_ERRORS_PATH, [])
+        item_errors = [err for err in all_errors if f"Item {idx} " in err]
+        if item_errors:
+            errors_context = "\n### Previous Validation Errors for this Item to Correct:\n" + "\n".join(f"- {err}" for err in item_errors) + "\nVerify that you fix all these errors in your output JSON fields.\n"
+
     prompt = f"""
 Analyze the following recruitment listing and the user's career profile to refine the job description and create writing suggestions for self-introduction letters.
 Output must be in JSON format matching the schema.
-
+{errors_context}
 ### User Profile:
 Skills: {profile.get("skills", [])}
 Preferred Locations: {profile.get("location_pref", [])}
@@ -850,12 +858,12 @@ def main():
     profile = load_user_profile()
     scored_results = []
     
-    for item in listings:
+    for idx, item in enumerate(listings):
         company = item.get("company", "")
         title = item.get("title", "")
         print(f"Refining and formatting job data for: {company} - {title}")
         
-        refined_data = analyze_job_with_llm(item, profile)
+        refined_data = analyze_job_with_llm(item, profile, idx)
         scored_results.append(refined_data)
         
     output_path = SCORE_OUTPUT_PATH

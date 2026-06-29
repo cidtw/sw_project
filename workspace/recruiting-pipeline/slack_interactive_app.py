@@ -14,9 +14,12 @@ from urllib.parse import quote_plus
 import requests
 from fastapi import FastAPI, Form
 
-from chatbot_search import hard_match_score, load_candidates, run_search
+from chatbot_search import hard_match_score, load_candidates, run_search, profile_to_search_profile
 from common import BASE_DIR, DATA_DIR, DB_PATH, normalized_job_key
 from scorer import clean_text, normalize_schema_payload
+
+pipeline_lock = threading.Lock()
+
 
 SLACK_API_BASE = "https://slack.com/api"
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
@@ -46,7 +49,7 @@ def now_utc():
 
 def init_profile_db():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(PROFILE_DB_PATH) as conn:
+    with sqlite3.connect(PROFILE_DB_PATH, timeout=15.0) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -143,7 +146,7 @@ def init_profile_db():
 
 def get_user_profile(user_id):
     init_profile_db()
-    with sqlite3.connect(PROFILE_DB_PATH) as conn:
+    with sqlite3.connect(PROFILE_DB_PATH, timeout=15.0) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
     return dict(row) if row else None
@@ -167,7 +170,7 @@ def save_user_profile(user_id, profile):
         "created_at": created_at,
         "updated_at": now_utc(),
     }
-    with sqlite3.connect(PROFILE_DB_PATH) as conn:
+    with sqlite3.connect(PROFILE_DB_PATH, timeout=15.0) as conn:
         conn.execute(
             """
             INSERT INTO users (
@@ -199,7 +202,7 @@ def save_user_profile(user_id, profile):
 
 def delete_user_profile(user_id):
     init_profile_db()
-    with sqlite3.connect(PROFILE_DB_PATH) as conn:
+    with sqlite3.connect(PROFILE_DB_PATH, timeout=15.0) as conn:
         conn.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
         conn.commit()
 
@@ -216,7 +219,7 @@ def get_user_preferences(user_id):
         "career_periods": "",
         "push_enabled": "true",
     }
-    with sqlite3.connect(PROFILE_DB_PATH) as conn:
+    with sqlite3.connect(PROFILE_DB_PATH, timeout=15.0) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT * FROM user_preferences WHERE user_id = ?", (user_id,)).fetchone()
     if not row:
@@ -242,7 +245,7 @@ def save_user_preferences(user_id, preferences):
         "created_at": created_at,
         "updated_at": now_utc(),
     }
-    with sqlite3.connect(PROFILE_DB_PATH) as conn:
+    with sqlite3.connect(PROFILE_DB_PATH, timeout=15.0) as conn:
         conn.execute(
             """
             INSERT INTO user_preferences (
@@ -275,23 +278,6 @@ def split_csv(value):
     return [part.strip() for part in clean_text(value).split(",") if part.strip()]
 
 
-def profile_to_search_profile(profile):
-    profile = profile or {}
-    return {
-        "age_gender": profile.get("age_gender", ""),
-        "education": profile.get("education", ""),
-        "career_level": profile.get("career_level", ""),
-        "경력구분": profile.get("career_level", ""),
-        "희망연봉": profile.get("desired_salary", ""),
-        "근무희망지역": split_csv(profile.get("location_pref", "")),
-        "보유자격": split_csv(profile.get("certificates", "")),
-        "skills": split_csv(profile.get("skills", "")),
-        "보유기술": split_csv(profile.get("skills", "")),
-        "experience_summary": profile.get("experience_summary", ""),
-        "경험요약": profile.get("experience_summary", ""),
-        "language_scores": profile.get("language_scores", ""),
-        "어학성적": profile.get("language_scores", ""),
-    }
 
 
 def profile_input(block_id, action_id, label, placeholder, initial_value="", optional=False):
@@ -735,7 +721,7 @@ def cache_selection_jobs(user_id, source, jobs):
     init_profile_db()
     now = now_utc()
     normalized_jobs = [normalize_job_for_storage(job, user_id) for job in jobs[:SCRAP_SELECTION_LIMIT]]
-    with sqlite3.connect(PROFILE_DB_PATH) as conn:
+    with sqlite3.connect(PROFILE_DB_PATH, timeout=15.0) as conn:
         conn.execute("DELETE FROM user_job_selection_cache WHERE user_id = ? AND source = ?", (user_id, source))
         for rank, payload in enumerate(normalized_jobs, start=1):
             job_key = job_key_for_payload(payload)
@@ -755,7 +741,7 @@ def cache_selection_jobs(user_id, source, jobs):
 
 def load_selection_cache(user_id, source):
     init_profile_db()
-    with sqlite3.connect(PROFILE_DB_PATH) as conn:
+    with sqlite3.connect(PROFILE_DB_PATH, timeout=15.0) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
@@ -783,7 +769,7 @@ def save_scrap_jobs(user_id, source, job_keys):
     cached_jobs = load_selection_cache(user_id, source)
     saved_jobs = []
     now = now_utc()
-    with sqlite3.connect(PROFILE_DB_PATH) as conn:
+    with sqlite3.connect(PROFILE_DB_PATH, timeout=15.0) as conn:
         for payload in cached_jobs:
             job_key = payload.get("_job_key") or job_key_for_payload(payload)
             if job_key not in selected_keys:
@@ -822,7 +808,7 @@ def save_scrap_jobs(user_id, source, job_keys):
 
 def load_scrapped_jobs(user_id, limit=30):
     init_profile_db()
-    with sqlite3.connect(PROFILE_DB_PATH) as conn:
+    with sqlite3.connect(PROFILE_DB_PATH, timeout=15.0) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
@@ -883,7 +869,7 @@ def search_jobs_in_db(query, target="all", include_closed=False):
             params.extend([like_value] * 6)
     where_sql = " AND ".join(where_parts)
 
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=15.0) as conn:
         conn.row_factory = sqlite3.Row
         try:
             rows = conn.execute(
@@ -1544,7 +1530,7 @@ def load_recent_open_jobs(limit=10, preferences=None):
     if not DB_PATH.exists():
         return filter_candidates_by_preferences(load_candidates(), preferences)[:limit]
     rows = []
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=15.0) as conn:
         conn.row_factory = sqlite3.Row
         try:
             rows = conn.execute(
@@ -1629,6 +1615,14 @@ def post_ephemeral(response_url, payload):
 
 
 def run_pipeline_and_post_table(response_url, user_id):
+    if not pipeline_lock.acquire(blocking=False):
+        post_ephemeral(
+            response_url,
+            {
+                "text": "현재 다른 사용자의 요청 또는 백그라운드에서 채용 파이프라인 수집/분석 작업이 실행 중입니다. 완료될 때까지 기다려 주세요."
+            }
+        )
+        return
     try:
         log_file = DATA_DIR / "pipeline_run.log"
         with open(log_file, "a", encoding="utf-8") as f:
@@ -1644,6 +1638,7 @@ def run_pipeline_and_post_table(response_url, user_id):
     except Exception as e:
         print(f"[ERROR] Failed to run pipeline: {e}")
     finally:
+        pipeline_lock.release()
         preferences = get_user_preferences(user_id)
         candidates = load_recent_open_jobs(10, preferences)
         post_ephemeral(
@@ -1748,12 +1743,22 @@ def parse_preferences_submission(data):
 
 
 def launch_pipeline():
-    subprocess.Popen(
-        [sys.executable, "-X", "utf8", str(PIPELINE_SCRIPT)],
-        cwd=str(BASE_DIR),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    if not pipeline_lock.acquire(blocking=False):
+        print("[WARNING] Pipeline launch skipped because it is already running.")
+        return
+
+    def target():
+        try:
+            subprocess.run(
+                [sys.executable, "-X", "utf8", str(PIPELINE_SCRIPT)],
+                cwd=str(BASE_DIR),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        finally:
+            pipeline_lock.release()
+
+    threading.Thread(target=target, daemon=True).start()
 
 
 @app.post("/slack/interactive")

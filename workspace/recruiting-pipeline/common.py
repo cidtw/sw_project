@@ -19,6 +19,8 @@ FETCH_OUTPUT_PATH = WORKSPACE_DIR / "fetch_output.json"
 ENRICH_OUTPUT_PATH = WORKSPACE_DIR / "enrich_output.json"
 SCORE_OUTPUT_PATH = WORKSPACE_DIR / "score_output.json"
 VERIFY_OUTPUT_PATH = WORKSPACE_DIR / "verify_output.json"
+VERIFY_ERRORS_PATH = WORKSPACE_DIR / "verify_errors.json"
+
 
 
 def read_json(path, default=None):

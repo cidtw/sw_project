@@ -32,6 +32,30 @@ def as_list(value):
     return []
 
 
+def split_csv(value):
+    return [part.strip() for part in clean_text(value).split(",") if part.strip()]
+
+
+def profile_to_search_profile(profile):
+    profile = profile or {}
+    return {
+        "age_gender": profile.get("age_gender", ""),
+        "education": profile.get("education", ""),
+        "career_level": profile.get("career_level", ""),
+        "경력구분": profile.get("career_level", ""),
+        "희망연봉": profile.get("desired_salary", ""),
+        "근무희망지역": split_csv(profile.get("location_pref", "")),
+        "보유자격": split_csv(profile.get("certificates", "")),
+        "skills": split_csv(profile.get("skills", "")),
+        "보유기술": split_csv(profile.get("skills", "")),
+        "experience_summary": profile.get("experience_summary", ""),
+        "경험요약": profile.get("experience_summary", ""),
+        "language_scores": profile.get("language_scores", ""),
+        "어학성적": profile.get("language_scores", ""),
+    }
+
+
+
 def merge_profile(base_profile, request_profile):
     merged = dict(base_profile or {})
     request_profile = request_profile if isinstance(request_profile, dict) else {}
@@ -221,16 +245,42 @@ def empty_result(slack_user_id, query):
     )
 
 
+def load_user_profile_from_db(user_id):
+    from common import DATA_DIR
+    import sqlite3
+    db_path = DATA_DIR / "slack_user_profiles.db"
+    if not db_path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(db_path, timeout=15.0)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        conn.close()
+        if row:
+            return dict(row)
+    except Exception as e:
+        print(f"Error loading user profile from DB: {e}", file=sys.stderr)
+    return None
+
+
 def run_search(request):
     slack_user_id = clean_text(request.get("slack_user_id") or request.get("user_id") or request.get("user"))
     query = clean_text(request.get("query") or request.get("text") or request.get("keyword"))
-    profile = merge_profile(load_user_profile(), request.get("profile", {}))
+    
+    req_profile = request.get("profile", {})
+    if slack_user_id and not req_profile:
+        db_profile = load_user_profile_from_db(slack_user_id)
+        if db_profile:
+            req_profile = profile_to_search_profile(db_profile)
+            
+    profile = merge_profile(load_user_profile(), req_profile)
     candidates = load_candidates()
     if not candidates:
         return empty_result(slack_user_id, query)
 
     ranked = sorted(candidates, key=lambda item: hard_match_score(item, profile, query), reverse=True)
     return normalize_schema_payload(ranked[0], "SEARCH", slack_user_id)
+
 
 
 def main():

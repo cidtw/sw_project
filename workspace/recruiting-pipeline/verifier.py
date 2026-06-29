@@ -2,7 +2,7 @@
 import re
 import sys
 
-from common import FETCH_OUTPUT_PATH, SCORE_OUTPUT_PATH, VERIFY_OUTPUT_PATH, read_json, write_json
+from common import FETCH_OUTPUT_PATH, SCORE_OUTPUT_PATH, VERIFY_OUTPUT_PATH, VERIFY_ERRORS_PATH, read_json, write_json
 
 GENERIC_REQUIREMENTS = {"공고 자격요건 및 전공 요건 참조", "자격요건 참조"}
 GENERIC_PREFERENCES = {"우대 스택 및 동종 업계 경력 우대", "우대사항 참조"}
@@ -108,6 +108,10 @@ def main():
         print("Verification failed with errors:", file=sys.stderr)
         for err in errors:
             print(f"  - {err}", file=sys.stderr)
+        try:
+            write_json(VERIFY_ERRORS_PATH, errors)
+        except Exception as e:
+            print(f"Failed to write verification errors: {e}", file=sys.stderr)
         sys.exit(1)
 
 if __name__ == "__main__":
