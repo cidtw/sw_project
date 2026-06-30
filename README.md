@@ -2,6 +2,11 @@
 
 JobKorea, Saramin, Incruit 공고를 수집하고, 기업/공고 정보를 정형화한 뒤 Slack Block Kit 기반 챗봇으로 최신 공고와 개인 맞춤 추천을 제공하는 로컬 운영형 서비스입니다.
 
+[![Install (for users)](https://img.shields.io/badge/Install%20%28for%20users%29-4A154B?style=for-the-badge&logo=slack&logoColor=white)](https://slack.com/oauth/v2/authorize?client_id=11358846796466.11397955311362&scope=chat:write,commands,app_mentions:read)
+
+- 사용자 설치 가이드(EN): [urchatbot-how-to-install.md](urchatbot-how-to-install.md)
+- 사용자 설치 가이드(KO): [urchatbot-how-to-install-ko.md](urchatbot-how-to-install-ko.md)
+
 ## 현재 운영 방식
 
 이전 Activepieces Catch Webhook 연동 방식은 제거했습니다. 현재 서비스는 다음 구조로 동작합니다.
